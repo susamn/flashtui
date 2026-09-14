@@ -1,0 +1,50 @@
+{
+  "blockdevices": [
+    {
+      "name": "/dev/zram0", "path": "/dev/zram0", "type": "disk", "size": 29065216000,
+      "fstype": "swap", "mountpoint": "[SWAP]", "rm": false, "hotplug": false, "ro": false
+    },
+    {
+      "name": "/dev/sda", "path": "/dev/sda", "type": "disk", "size": 31266996224,
+      "model": "STORAGE DEVICE", "vendor": "Generic", "serial": "SERIAL-REDACTED",
+      "tran": "usb", "rm": true, "hotplug": true, "ro": false, "pttype": "dos",
+      "children": [
+        {
+          "name": "/dev/sda1", "path": "/dev/sda1", "type": "part", "size": 536870912,
+          "fstype": "vfat", "label": "bootfs", "uuid": "0000-0001",
+          "fsavail": 460519424, "fsused": 68157440,
+          "mountpoint": "/run/media/susamn/bootfs"
+        },
+        {
+          "name": "/dev/sda2", "path": "/dev/sda2", "type": "part", "size": 30712791040,
+          "fstype": "ext4", "label": "rootfs", "uuid": "00000000-0000-0000-0000-000000000000",
+          "fsavail": 26204012544, "fsused": 2415919104,
+          "mountpoint": "/run/media/susamn/rootfs"
+        }
+      ]
+    },
+    {
+      "name": "/dev/nvme0n1", "path": "/dev/nvme0n1", "type": "disk", "size": 2000398934016,
+      "model": "CT2000P5PSSD8", "serial": "SERIAL-REDACTED",
+      "tran": "nvme", "rm": false, "hotplug": false, "ro": false, "pttype": "gpt",
+      "children": [
+        {
+          "name": "/dev/nvme0n1p1", "path": "/dev/nvme0n1p1", "type": "part", "size": 2147483648,
+          "fstype": "vfat", "label": "BOOT", "mountpoint": "/boot",
+          "fsavail": 1073741824, "fsused": 1073741824
+        },
+        {
+          "name": "/dev/nvme0n1p2", "path": "/dev/nvme0n1p2", "type": "part", "size": 1998249066496,
+          "fstype": "crypto_LUKS", "mountpoint": null,
+          "children": [
+            {
+              "name": "/dev/mapper/root", "path": "/dev/mapper/root", "type": "crypt",
+              "size": 1998247000000, "fstype": "ext4", "mountpoint": "/home",
+              "fsavail": 1200000000000, "fsused": 700000000000
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
