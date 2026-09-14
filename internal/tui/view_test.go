@@ -110,3 +110,15 @@ func lineWidth(s string) int {
 	}
 	return n
 }
+
+// Rows are styled before they reach the pane, so any width handling there has
+// to ignore the escape bytes or the visible text gets cut to nothing.
+func TestListRowsAreNotCutByTheirOwnStyling(t *testing.T) {
+	m := testModel()
+	out := m.View()
+	for _, want := range []string{"b.img.xz", "nvme0n1", "STORAGE DEVICE"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("%q was truncated out of the list", want)
+		}
+	}
+}

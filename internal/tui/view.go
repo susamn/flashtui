@@ -110,7 +110,6 @@ func (m Model) listPane(p pane, width int, rows []string) string {
 		title = m.styles.titleFocus
 	}
 
-	inner := width - 4 // border + padding
 	h := m.listHeight()
 
 	var b strings.Builder
@@ -118,7 +117,10 @@ func (m Model) listPane(p pane, width int, rows []string) string {
 	b.WriteString("\n")
 	for i := 0; i < h; i++ {
 		if i < len(rows) {
-			b.WriteString(truncate(rows[i], inner))
+			// Rows arrive already padded and styled. Truncating here would
+			// count the ANSI escape bytes against the visible width and cut
+			// the text to a few characters.
+			b.WriteString(rows[i])
 		}
 		if i < h-1 {
 			b.WriteString("\n")
