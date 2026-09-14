@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/susamn/flashtui/internal/imagefile"
@@ -93,6 +94,11 @@ type Job struct {
 	// ScratchDir is where the privileged script is staged. Empty uses the
 	// system temporary directory.
 	ScratchDir string
+	// OnAuthenticated fires once the privileged script is confirmed running,
+	// which is the moment pkexec's password prompt is finished with the
+	// terminal. A TUI uses it to take the terminal back. It is called at most
+	// once, from a background goroutine, and may be nil.
+	OnAuthenticated func()
 }
 
 // directRead controls iflag=direct on the verify read. Tests targeting a
@@ -145,12 +151,19 @@ func Run(ctx context.Context, esc *privilege.Escalator, job Job, updates chan<- 
 	if err != nil {
 		return err
 	}
+	// The script announces itself on stderr as soon as it is running, which is
+	// how the caller learns authentication is over without having to guess.
 	stderr := &tailBuffer{limit: 4 << 10}
-	cmd.Stderr = stderr
+	watcher := &authWatcher{sink: stderr, notify: job.OnAuthenticated}
+	cmd.Stderr = watcher
 
 	if err := cmd.Start(); err != nil {
+		watcher.fire()
 		return fmt.Errorf("start writer: %w", err)
 	}
+	// A refused or abandoned prompt never produces the marker; fire it anyway
+	// once the process is done so a released terminal is always taken back.
+	defer watcher.fire()
 
 	// Phase 1: stream the image in, hashing as it goes.
 	h := sha256.New()
@@ -311,3 +324,48 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 }
 
 func (t *tailBuffer) String() string { return string(t.buf) }
+
+// authWatcher forwards stderr to sink while watching for the script's ready
+// marker, firing notify exactly once when it appears.
+type authWatcher struct {
+	sink   *tailBuffer
+	notify func()
+
+	mu   sync.Mutex
+	seen bool
+	head []byte
+}
+
+func (w *authWatcher) Write(p []byte) (int, error) {
+	n, err := w.sink.Write(p)
+	w.mu.Lock()
+	if !w.seen {
+		// The marker is the first thing written, so only a small prefix has to
+		// be buffered to find it.
+		if len(w.head) < 256 {
+			w.head = append(w.head, p...)
+		}
+		if bytes.Contains(w.head, []byte(readyMarker)) {
+			w.mu.Unlock()
+			w.fire()
+			return n, err
+		}
+	}
+	w.mu.Unlock()
+	return n, err
+}
+
+// fire runs notify at most once.
+func (w *authWatcher) fire() {
+	w.mu.Lock()
+	if w.seen {
+		w.mu.Unlock()
+		return
+	}
+	w.seen = true
+	fn := w.notify
+	w.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}

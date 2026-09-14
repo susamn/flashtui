@@ -17,10 +17,17 @@ import (
 // The unprivileged side still owns both data streams: the image goes in on
 // stdin and the read-back comes out on stdout, so progress and the digest are
 // computed here rather than trusted from the child.
+// readyMarker is echoed by the script once it is running as root.
+const readyMarker = "__flashtui_authenticated__"
+
 func buildScript(target string, verify, directRead bool, blockSize int) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
 	b.WriteString("set -eu\n")
+	// Printed the instant the script starts, which is the instant pkexec has
+	// finished authenticating. The caller watches for it so the terminal is
+	// released only for the password prompt, not for the whole write.
+	fmt.Fprintf(&b, "echo %s >&2\n", readyMarker)
 	fmt.Fprintf(&b, "TARGET=%s\n", shellQuote(target))
 	fmt.Fprintf(&b, "BS=%d\n", blockSize)
 	b.WriteString(`
