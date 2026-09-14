@@ -383,7 +383,7 @@ func (m Model) runFlash() (tea.Model, tea.Cmd) {
 		Verify:     m.verify,
 		ScratchDir: m.scratch,
 	}
-	run, ch, cancel := startFlash(m.esc, job, m.guard.disk)
+	run, ch, cancel := startFlash(m.esc, job, m.guard.disk, m.term)
 
 	m.progressCh = ch
 	m.cancel = cancel
@@ -447,7 +447,7 @@ func (m Model) keySeed(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.form.err = ""
 		m.mode = modeFlashing // reuse the busy view while the script runs
 		m.setStatus(levelInfo, "writing configuration…")
-		return m, applySeed(m.esc, m.detection, cfg, m.scratch)
+		return m, applySeed(m.esc, m.detection, cfg, m.scratch, m.term)
 	}
 
 	return m, m.form.update(msg)
