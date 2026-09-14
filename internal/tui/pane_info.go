@@ -114,7 +114,12 @@ func (m Model) partitionLines(d blockdev.Disk, inner int) []string {
 		if used, avail := int64(p.FSUsed), int64(p.FSAvail); used+avail > 0 {
 			total := used + avail
 			frac := float64(used) / float64(total)
+			// Capped rather than filling the pane: a usage bar is a glance,
+			// and a very wide one just pushes the numbers off to the right.
 			barW := inner - 26
+			if barW > 24 {
+				barW = 24
+			}
 			if barW < 6 {
 				barW = 6
 			}

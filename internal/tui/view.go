@@ -60,9 +60,11 @@ func (m Model) showWritePane() bool {
 // View renders the whole screen.
 func (m Model) View() string {
 	if m.width < minWidth || m.height < minHeight {
-		return m.styles.warn.Render(
+		// Wrapped, because the terminal that triggers this message is by
+		// definition too narrow to print it on one line.
+		return m.styles.warn.Render(wrap(
 			sprintf("terminal is %dx%d; flashtui needs at least %dx%d",
-				m.width, m.height, minWidth, minHeight))
+				m.width, m.height, minWidth, minHeight), m.width, 0))
 	}
 
 	switch m.mode {
