@@ -37,6 +37,12 @@ func New() (*Escalator, error) {
 	return e, nil
 }
 
+// Direct returns an Escalator that never escalates and runs every command as
+// the current user. It is what New already returns when the process is root,
+// and it is how a caller opts out of escalation for a target that does not
+// need it, such as writing to a regular file.
+func Direct() *Escalator { return &Escalator{amRoot: true} }
+
 // Root reports whether commands will run without escalation.
 func (e *Escalator) Root() bool { return e.amRoot }
 
