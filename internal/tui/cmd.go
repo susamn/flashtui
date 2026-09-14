@@ -91,11 +91,17 @@ func partitionPaths(d blockdev.Disk) []string {
 //
 // The returned cancel stops the write; the caller keeps it so the user can
 // abort.
-func startFlash(esc *privilege.Escalator, job flash.Job, disk blockdev.Disk) (tea.Cmd, chan flash.Progress, context.CancelFunc) {
+func startFlash(esc *privilege.Escalator, job flash.Job, disk blockdev.Disk, term *terminal) (tea.Cmd, chan flash.Progress, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	updates := make(chan flash.Progress, 64)
 
+	// pkexec prompts on /dev/tty, which bubbletea is holding in raw mode. The
+	// terminal goes back to the shell for the prompt and is reclaimed as soon
+	// as the privileged script reports that it is running.
+	job.OnAuthenticated = term.restore
+
 	run := func() tea.Msg {
+		term.release()
 		// Writing to a disk whose filesystems are mounted corrupts the
 		// kernel's cached view of them, so this has to succeed first.
 		uctx, ucancel := context.WithTimeout(ctx, opTimeout)
@@ -166,10 +172,15 @@ func detectAfterFlash(target string) tea.Cmd {
 
 // applySeed mounts what the detection named, writes the configuration, then
 // unmounts again so the card is safe to pull.
-func applySeed(esc *privilege.Escalator, det seed.Detection, cfg seed.Config, scratch string) tea.Cmd {
+func applySeed(esc *privilege.Escalator, det seed.Detection, cfg seed.Config, scratch string, term *terminal) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
+
+		// Seeding is one short privileged script, so the terminal is simply
+		// lent out for its whole duration rather than handed back mid-run.
+		term.release()
+		defer term.restore()
 
 		var m seed.Mounted
 		var toUnmount []string

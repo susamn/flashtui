@@ -106,6 +106,7 @@ type Model struct {
 
 	esc     *privilege.Escalator
 	scratch string
+	term    *terminal
 
 	imageDir string
 	images   []imagefile.Image
@@ -155,6 +156,7 @@ func New(esc *privilege.Escalator, imageDir, scratch string) Model {
 		styles:   newStyles(),
 		keys:     defaultKeys(),
 		esc:      esc,
+		term:     newTerminal(),
 		scratch:  scratch,
 		imageDir: imageDir,
 		verify:   true,
