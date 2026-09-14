@@ -117,7 +117,7 @@ const lsblkFields = "NAME,PATH,TYPE,SIZE,MODEL,VENDOR,SERIAL,TRAN,RM,HOTPLUG,RO,
 // List returns every whole disk on the system, partitions attached, with
 // System already resolved.
 func List() ([]Disk, error) {
-	out, err := runner("lsblk", "--json", "--bytes", "--paths", "-o", lsblkFields)
+	out, err := runner(lsblkBinary(), "--json", "--bytes", "--paths", "-o", lsblkFields)
 	if err != nil {
 		return nil, fmt.Errorf("lsblk: %w", err)
 	}
