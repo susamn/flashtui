@@ -13,8 +13,6 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
-
-	"github.com/susamn/flashtui/internal/privilege"
 )
 
 // run is swapped out in tests.
@@ -81,20 +79,12 @@ func PowerOff(ctx context.Context, disk string) error {
 	return nil
 }
 
-// Rescan makes the kernel re-read the partition table after a write, so the new
-// partitions appear as device nodes and can be mounted for seeding. Unlike the
-// rest of this package it needs root.
-func Rescan(ctx context.Context, esc *privilege.Escalator, disk string) error {
-	cmd, err := esc.Command(ctx, "partprobe", disk)
-	if err != nil {
-		return err
-	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("partprobe %s: %s", disk, firstLine(string(out)))
-	}
-	// partprobe returns before udev has finished creating the nodes.
+// Settle waits for udev to finish creating the device nodes for a partition
+// table that was just rewritten. It needs no privileges, which matters: the
+// flash script already ran partprobe as root, and escalating again here would
+// cost the user a second password prompt for nothing.
+func Settle(ctx context.Context) {
 	_, _ = run(ctx, "udevadm", "settle", "--timeout=10")
-	return nil
 }
 
 // existingMount asks lsblk where a partition is mounted, for the paths where

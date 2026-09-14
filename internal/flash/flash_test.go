@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,7 +64,7 @@ func TestWriteAndVerifyRoundTrip(t *testing.T) {
 	img := imageOf(t, dir, "src.img", raw)
 	target := filepath.Join(dir, "target.dev")
 
-	err, prog := runJob(t, Job{Image: img, Target: target, TargetSize: 64 << 20, Verify: true})
+	err, prog := runJob(t, Job{Image: img, Target: target, TargetSize: 64 << 20, Verify: true, ScratchDir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +109,7 @@ func TestWriteDecompresses(t *testing.T) {
 	}
 	target := filepath.Join(dir, "target.dev")
 
-	err, prog := runJob(t, Job{Image: img, Target: target, TargetSize: 64 << 20, Verify: true})
+	err, prog := runJob(t, Job{Image: img, Target: target, TargetSize: 64 << 20, Verify: true, ScratchDir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,31 +131,68 @@ func TestVerifyDetectsCorruption(t *testing.T) {
 	img := imageOf(t, dir, "src.img", raw)
 	target := filepath.Join(dir, "target.dev")
 
-	if err, _ := runJob(t, Job{Image: img, Target: target, TargetSize: 64 << 20}); err != nil {
+	if err, _ := runJob(t, Job{Image: img, Target: target, TargetSize: 64 << 20, ScratchDir: dir}); err != nil {
 		t.Fatal(err)
 	}
-	// Flip one byte behind flash's back, then verify the same image again.
+	// Flip one byte behind flash's back, the way a failing card would.
 	f, err := os.OpenFile(target, os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteAt([]byte{0xFF ^ raw[1234]}, 1234); err != nil {
+	if _, err := f.WriteAt([]byte{raw[1234] ^ 0xFF}, 1234); err != nil {
 		t.Fatal(err)
 	}
 	f.Close()
+
+	// readBack compares what the device returns against the digest the write
+	// accumulated from the pristine image.
+	on, err := os.Open(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer on.Close()
 
 	ch := make(chan Progress, 256)
 	go func() {
 		for range ch {
 		}
 	}()
-	// The digest write() would have accumulated from the pristine image.
-	sum := newHashOf(t, raw)
-	verr := verify(context.Background(), privilege.Direct(),
-		Job{Image: img, Target: target}, int64(len(raw)), sum, ch)
-	close(ch)
-	if verr == nil {
+	defer close(ch)
+
+	err = readBack(context.Background(), on, int64(len(raw)), newHashOf(t, raw), ch)
+	if err == nil {
 		t.Fatal("verify must reject a device whose contents were altered")
+	}
+	if !strings.Contains(err.Error(), "differ") {
+		t.Errorf("error should name the mismatch, got %v", err)
+	}
+}
+
+// A clean read-back must pass, or the check above proves nothing.
+func TestVerifyAcceptsIntactDevice(t *testing.T) {
+	dir := t.TempDir()
+	raw := payload(3 << 20)
+	img := imageOf(t, dir, "src.img", raw)
+	target := filepath.Join(dir, "target.dev")
+
+	if err, _ := runJob(t, Job{Image: img, Target: target, TargetSize: 64 << 20, ScratchDir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	on, err := os.Open(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer on.Close()
+
+	ch := make(chan Progress, 256)
+	go func() {
+		for range ch {
+		}
+	}()
+	defer close(ch)
+
+	if err := readBack(context.Background(), on, int64(len(raw)), newHashOf(t, raw), ch); err != nil {
+		t.Fatalf("intact device rejected: %v", err)
 	}
 }
 
@@ -163,7 +201,7 @@ func TestRefusesTargetTooSmall(t *testing.T) {
 	img := imageOf(t, dir, "src.img", payload(8<<20))
 	target := filepath.Join(dir, "target.dev")
 
-	err, _ := runJob(t, Job{Image: img, Target: target, TargetSize: 1 << 20})
+	err, _ := runJob(t, Job{Image: img, Target: target, TargetSize: 1 << 20, ScratchDir: dir})
 	if !errors.Is(err, ErrTargetTooSmall) {
 		t.Fatalf("got %v, want ErrTargetTooSmall", err)
 	}
@@ -184,7 +222,7 @@ func TestCancellationStopsWrite(t *testing.T) {
 			cancel() // abort as soon as the first sample lands
 		}
 	}()
-	err := Run(ctx, privilege.Direct(), Job{Image: img, Target: target, TargetSize: 1 << 30}, ch)
+	err := Run(ctx, privilege.Direct(), Job{Image: img, Target: target, TargetSize: 1 << 30, ScratchDir: dir}, ch)
 	if err == nil {
 		t.Fatal("want an error after cancellation")
 	}

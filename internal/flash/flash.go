@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/susamn/flashtui/internal/imagefile"
@@ -88,12 +90,13 @@ type Job struct {
 	// that cannot fit before any data is sent. Zero skips the check.
 	TargetSize int64
 	Verify     bool
+	// ScratchDir is where the privileged script is staged. Empty uses the
+	// system temporary directory.
+	ScratchDir string
 }
 
-// directRead controls iflag=direct on the verify read, which bypasses the page
-// cache so the comparison sees what actually landed on the device rather than
-// what was written through it. Tests targeting a regular file turn it off,
-// because O_DIRECT is unsupported on tmpfs.
+// directRead controls iflag=direct on the verify read. Tests targeting a
+// regular file turn it off, because O_DIRECT is unsupported on tmpfs.
 var directRead = true
 
 // blockSize matches what dd is told to use. 4 MiB keeps the syscall count low
@@ -105,6 +108,9 @@ var ErrTargetTooSmall = errors.New("image is larger than the target device")
 
 // Run executes the job, emitting Progress on updates. It closes updates before
 // returning. The caller must not write to updates.
+//
+// The whole privileged half runs as one script under a single escalation; see
+// buildScript for why.
 func Run(ctx context.Context, esc *privilege.Escalator, job Job, updates chan<- Progress) error {
 	defer close(updates)
 
@@ -115,87 +121,23 @@ func Run(ctx context.Context, esc *privilege.Escalator, job Job, updates chan<- 
 			ErrTargetTooSmall, need, job.Target, job.TargetSize)
 	}
 
-	written, sum, err := write(ctx, esc, job, updates)
+	src, err := job.Image.Reader()
 	if err != nil {
 		return err
 	}
-	if job.Verify {
-		if err := verify(ctx, esc, job, written, sum, updates); err != nil {
-			return err
-		}
-	}
-	send(updates, Progress{Phase: PhaseDone, Bytes: written, Total: written})
-	return nil
-}
-
-// write streams the decompressed image into dd and returns the byte count and
-// SHA-256 of what was sent.
-func write(ctx context.Context, esc *privilege.Escalator, job Job, updates chan<- Progress) (int64, []byte, error) {
-	src, err := job.Image.Reader()
-	if err != nil {
-		return 0, nil, err
-	}
 	defer src.Close()
 
-	// conv=fsync makes dd flush before exiting, so a clean exit means the data
-	// reached the device rather than the page cache.
-	cmd, err := esc.Command(ctx, "dd",
-		"of="+job.Target,
-		fmt.Sprintf("bs=%d", blockSize),
-		"conv=fsync",
-		"status=none",
-	)
+	scriptPath, cleanup, err := stageScript(job)
 	if err != nil {
-		return 0, nil, err
+		return err
+	}
+	defer cleanup()
+
+	cmd, err := esc.Command(ctx, "sh", scriptPath)
+	if err != nil {
+		return err
 	}
 	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return 0, nil, err
-	}
-	stderr := &tailBuffer{limit: 4 << 10}
-	cmd.Stderr = stderr
-
-	if err := cmd.Start(); err != nil {
-		return 0, nil, fmt.Errorf("start dd: %w", err)
-	}
-
-	h := sha256.New()
-	n, copyErr := pump(ctx, stdin, src, h, job.Image.WriteSize(), PhaseWriting, updates)
-	// Closing stdin is what tells dd to finish and fsync; it must happen even
-	// on a copy error so Wait cannot block forever.
-	closeErr := stdin.Close()
-
-	send(updates, Progress{Phase: PhaseFlushing, Bytes: n, Total: job.Image.WriteSize()})
-	waitErr := cmd.Wait()
-
-	switch {
-	case copyErr != nil:
-		return n, nil, copyErr
-	case waitErr != nil:
-		if privilege.ErrDenied(waitErr) {
-			return n, nil, errors.New("authorisation denied; nothing was written")
-		}
-		return n, nil, fmt.Errorf("dd: %w: %s", waitErr, stderr.String())
-	case closeErr != nil:
-		return n, nil, fmt.Errorf("closing dd stdin: %w", closeErr)
-	}
-	return n, h.Sum(nil), nil
-}
-
-// verify reads the written range back off the device and compares digests.
-func verify(ctx context.Context, esc *privilege.Escalator, job Job, written int64, want []byte, updates chan<- Progress) error {
-	blocks := (written + blockSize - 1) / blockSize
-
-	args := []string{
-		"if=" + job.Target,
-		fmt.Sprintf("bs=%d", blockSize),
-		fmt.Sprintf("count=%d", blocks),
-		"status=none",
-	}
-	if directRead {
-		args = append(args, "iflag=direct")
-	}
-	cmd, err := esc.Command(ctx, "dd", args...)
 	if err != nil {
 		return err
 	}
@@ -205,29 +147,80 @@ func verify(ctx context.Context, esc *privilege.Escalator, job Job, written int6
 	}
 	stderr := &tailBuffer{limit: 4 << 10}
 	cmd.Stderr = stderr
+
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start verify read: %w", err)
+		return fmt.Errorf("start writer: %w", err)
 	}
 
+	// Phase 1: stream the image in, hashing as it goes.
 	h := sha256.New()
-	// The final block is padded up to blockSize by dd, so only the first
-	// `written` bytes take part in the digest.
-	n, copyErr := pump(ctx, io.Discard, io.LimitReader(stdout, written), h, written, PhaseVerifying, updates)
-	// Drain the padding so dd is never killed by SIGPIPE on a short read.
-	_, _ = io.Copy(io.Discard, stdout)
+	written, copyErr := pump(ctx, stdin, src, h, job.Image.WriteSize(), PhaseWriting, updates)
+	// Closing stdin is what tells dd to finish and fsync; it must happen even
+	// on a copy error, or Wait blocks forever.
+	closeErr := stdin.Close()
+	send(updates, Progress{Phase: PhaseFlushing, Bytes: written, Total: job.Image.WriteSize()})
+
+	// Phase 2: read the device back off the same process's stdout. Draining it
+	// unconditionally keeps the child from blocking on a full pipe even when
+	// verification is off and nothing is expected.
+	var verifyErr error
+	if copyErr == nil && job.Verify {
+		verifyErr = readBack(ctx, stdout, written, h.Sum(nil), updates)
+	} else {
+		_, _ = io.Copy(io.Discard, stdout)
+	}
+
 	waitErr := cmd.Wait()
 
-	if copyErr != nil {
+	switch {
+	case copyErr != nil:
 		return copyErr
+	case waitErr != nil:
+		if privilege.ErrDenied(waitErr) {
+			return errors.New("authorisation denied; nothing was written")
+		}
+		return fmt.Errorf("write failed: %w: %s", waitErr, stderr.String())
+	case closeErr != nil:
+		return fmt.Errorf("closing writer input: %w", closeErr)
+	case verifyErr != nil:
+		return verifyErr
 	}
-	if waitErr != nil {
-		return fmt.Errorf("verify read: %w: %s", waitErr, stderr.String())
+
+	send(updates, Progress{Phase: PhaseDone, Bytes: written, Total: written})
+	return nil
+}
+
+// stageScript writes the privileged script somewhere the root shell can read
+// it and returns a cleanup that removes it.
+func stageScript(job Job) (string, func(), error) {
+	dir := job.ScratchDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	path := filepath.Join(dir, "flashtui-write.sh")
+	body := buildScript(job.Target, job.Verify, directRead, blockSize)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		return "", nil, fmt.Errorf("stage write script: %w", err)
+	}
+	return path, func() { os.Remove(path) }, nil
+}
+
+// readBack consumes the verification stream and compares its digest with the
+// one accumulated during the write.
+func readBack(ctx context.Context, stdout io.Reader, written int64, want []byte, updates chan<- Progress) error {
+	h := sha256.New()
+	// dd pads the final block, so only the first `written` bytes take part.
+	n, err := pump(ctx, io.Discard, io.LimitReader(stdout, written), h, written, PhaseVerifying, updates)
+	// Drain the padding so the child is never killed by SIGPIPE on a short read.
+	_, _ = io.Copy(io.Discard, stdout)
+	if err != nil {
+		return err
 	}
 	if n != written {
 		return fmt.Errorf("verify read %d bytes, expected %d", n, written)
 	}
-	if got := h.Sum(nil); !bytes.Equal(got, want) {
-		return fmt.Errorf("verification failed: device contents differ from the image")
+	if !bytes.Equal(h.Sum(nil), want) {
+		return errors.New("verification failed: the device contents differ from the image")
 	}
 	return nil
 }
