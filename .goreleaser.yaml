@@ -1,0 +1,88 @@
+# GoReleaser builds the release binaries and updates susamn/homebrew-tap.
+# Exercise locally with: goreleaser release --snapshot --clean
+version: 2
+
+project_name: flashtui
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: flashtui
+    main: ./cmd/flashtui
+    binary: flashtui
+    env:
+      - CGO_ENABLED=0
+    # Linux only. flashtui drives lsblk, udevadm, partprobe and pkexec;
+    # it compiles for darwin but none of those exist there, so a macOS
+    # build would install and then fail at the first drive scan.
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: flashtui
+    ids:
+      - flashtui
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "^build:"
+      - "^merge:"
+
+homebrew_casks:
+  - name: flashtui
+    repository:
+      owner: susamn
+      name: homebrew-tap
+      branch: main
+      # A fine-grained PAT with Contents:read-write on susamn/homebrew-tap.
+      # The default GITHUB_TOKEN cannot push to another repository.
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: "https://github.com/susamn/flashtui"
+    description: "Terminal UI for writing OS images to removable drives"
+    commit_msg_template: "flashtui {{ .Tag }}"
+    caveats: |
+      flashtui drives system tools Homebrew does not package. Install them
+      with your distribution's package manager:
+
+        Arch     sudo pacman -S util-linux systemd polkit
+        Debian   sudo apt install util-linux udev policykit-1
+        Fedora   sudo dnf install util-linux systemd-udev polkit
+
+      It needs lsblk, udevadm and partprobe to enumerate drives, and
+      pkexec to acquire the privileges writing a block device requires.
+      Compressed images additionally need xz, gzip or zstd on PATH,
+      whichever formats you intend to write.
+
+      Do not reach for `brew install util-linux` here. Homebrew's lsblk is
+      not linked against libudev and silently reports no filesystem type,
+      label or partition table, which would leave the drive readout and
+      the safety guard blank. flashtui prefers /usr/bin/lsblk for exactly
+      this reason -- keep the distribution's copy installed.
+
+release:
+  github:
+    owner: susamn
+    name: flashtui

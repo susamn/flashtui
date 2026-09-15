@@ -35,6 +35,16 @@ target device and optional headless first-boot setup.
 ## Install
 
 ```sh
+brew install susamn/tap/flashtui
+```
+
+A prebuilt Linux binary, so no Go toolchain is needed. See `## Requirements`
+below for the system tools flashtui drives -- in particular, do not install
+Homebrew's util-linux.
+
+Or build it yourself:
+
+```sh
 make build          # produces ./flashtui
 make check          # gofmt, vet and tests
 ```
