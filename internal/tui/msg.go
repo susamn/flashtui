@@ -23,16 +23,21 @@ type disksMsg struct {
 }
 
 // progressMsg is one sample from an in-flight flash.
-type progressMsg flash.Progress
+type progressMsg struct {
+	opID     int
+	progress flash.Progress
+}
 
 // flashDoneMsg ends a flash, successfully or not.
 type flashDoneMsg struct {
+	opID   int
 	target string
 	err    error
 }
 
 // mountMsg reports the outcome of a mount, unmount or power-off.
 type mountMsg struct {
+	opID   int
 	action string
 	detail string
 	err    error
@@ -40,12 +45,16 @@ type mountMsg struct {
 
 // detectMsg carries the post-flash classification of the written disk.
 type detectMsg struct {
+	opID      int
 	detection seed.Detection
 	err       error
 }
 
 // seedDoneMsg ends a seeding run.
-type seedDoneMsg struct{ err error }
+type seedDoneMsg struct {
+	opID int
+	err  error
+}
 
 // tickMsg drives the indeterminate bar's animation.
 type tickMsg struct{}

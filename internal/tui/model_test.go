@@ -194,3 +194,41 @@ func TestToggles(t *testing.T) {
 		t.Error("s did not toggle seeding on")
 	}
 }
+
+func TestStaleAsyncMessagesIgnored(t *testing.T) {
+	m := testModel()
+	m.currentOp = 5
+	m.status = "initial status"
+
+	// Dispatch stale messages with opID = 1
+	next, _ := m.Update(flashDoneMsg{opID: 1, target: "/dev/sda", err: nil})
+	m = next.(Model)
+	if m.status != "initial status" {
+		t.Errorf("stale flashDoneMsg modified status: %q", m.status)
+	}
+
+	next, _ = m.Update(mountMsg{opID: 1, action: "mount", detail: "done", err: nil})
+	m = next.(Model)
+	if m.status != "initial status" {
+		t.Errorf("stale mountMsg modified status: %q", m.status)
+	}
+
+	next, _ = m.Update(detectMsg{opID: 1})
+	m = next.(Model)
+	if m.mode == modeSeed {
+		t.Error("stale detectMsg entered modeSeed")
+	}
+}
+
+func TestWindowResizeClampsLists(t *testing.T) {
+	m := testModel()
+	m.imgList.cursor = 2
+	m.imgList.offset = 1
+
+	// Resize to small height
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m = next.(Model)
+	if m.imgList.cursor < 0 || m.imgList.cursor >= len(m.images) {
+		t.Errorf("cursor after resize out of bounds: %d", m.imgList.cursor)
+	}
+}

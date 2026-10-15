@@ -13,6 +13,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.imgList.clamp(len(m.images), m.listHeight())
+		m.diskList.clamp(len(m.disks), m.listHeight())
 		return m, nil
 
 	case imagesMsg:
@@ -22,18 +24,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onDisks(msg), nil
 
 	case progressMsg:
+		if msg.opID != m.currentOp {
+			return m, nil
+		}
 		return m.onProgress(msg)
 
 	case flashDoneMsg:
+		if msg.opID != m.currentOp {
+			return m, nil
+		}
 		return m.onFlashDone(msg)
 
 	case detectMsg:
+		if msg.opID != m.currentOp {
+			return m, nil
+		}
 		return m.onDetect(msg), nil
 
 	case seedDoneMsg:
+		if msg.opID != m.currentOp {
+			return m, nil
+		}
 		return m.onSeedDone(msg), listDisks()
 
 	case mountMsg:
+		if msg.opID != m.currentOp {
+			return m, nil
+		}
 		return m.onMount(msg), listDisks()
 
 	case tickMsg:
@@ -91,11 +108,11 @@ func (m Model) onDisks(msg disksMsg) Model {
 }
 
 func (m Model) onProgress(msg progressMsg) (tea.Model, tea.Cmd) {
-	m.progress = flash.Progress(msg)
+	m.progress = msg.progress
 	if m.progressCh == nil {
 		return m, nil
 	}
-	return m, awaitProgress(m.progressCh)
+	return m, awaitProgress(msg.opID, m.progressCh)
 }
 
 func (m Model) onFlashDone(msg flashDoneMsg) (tea.Model, tea.Cmd) {
@@ -117,7 +134,7 @@ func (m Model) onFlashDone(msg flashDoneMsg) (tea.Model, tea.Cmd) {
 
 	if m.seedAfter {
 		m.setStatus(levelInfo, "inspecting the written image…")
-		return m, detectAfterFlash(msg.target)
+		return m, detectAfterFlash(m.currentOp, msg.target)
 	}
 	return m, listDisks()
 }
@@ -139,6 +156,7 @@ func (m Model) onDetect(msg detectMsg) Model {
 }
 
 func (m Model) onSeedDone(msg seedDoneMsg) Model {
+	m.opBusy = false
 	m.mode = modeReport
 	if msg.err != nil {
 		m.lastErr = msg.err
@@ -152,6 +170,7 @@ func (m Model) onSeedDone(msg seedDoneMsg) Model {
 }
 
 func (m Model) onMount(msg mountMsg) Model {
+	m.opBusy = false
 	if msg.err != nil {
 		m.setStatus(levelError, "%s failed: %v", msg.action, msg.err)
 		return m
@@ -263,22 +282,38 @@ func (m Model) keyBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.beginFlash()
 
 	case matches(msg, m.keys.Mount):
+		if m.busy() {
+			m.setStatus(levelWarn, "operation already in progress")
+			return m, nil
+		}
 		d, ok := m.selectedDisk()
 		if !ok {
 			return m, nil
 		}
+		m.currentOp++
+		m.opBusy = true
 		m.setStatus(levelInfo, "mounting %s…", d.Path)
-		return m, mountDisk(d)
+		return m, mountDisk(m.currentOp, d)
 
 	case matches(msg, m.keys.Unmount):
+		if m.busy() {
+			m.setStatus(levelWarn, "operation already in progress")
+			return m, nil
+		}
 		d, ok := m.selectedDisk()
 		if !ok {
 			return m, nil
 		}
+		m.currentOp++
+		m.opBusy = true
 		m.setStatus(levelInfo, "unmounting %s…", d.Path)
-		return m, unmountDisk(d)
+		return m, unmountDisk(m.currentOp, d)
 
 	case matches(msg, m.keys.PowerOff):
+		if m.busy() {
+			m.setStatus(levelWarn, "operation already in progress")
+			return m, nil
+		}
 		d, ok := m.selectedDisk()
 		if !ok {
 			return m, nil
@@ -287,8 +322,10 @@ func (m Model) keyBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.setStatus(levelError, "refusing to power off the system disk")
 			return m, nil
 		}
+		m.currentOp++
+		m.opBusy = true
 		m.setStatus(levelInfo, "powering off %s…", d.Path)
-		return m, powerOffDisk(d)
+		return m, powerOffDisk(m.currentOp, d)
 	}
 
 	m.moveCursor(msg)
@@ -376,6 +413,8 @@ func (m Model) keyGuard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) runFlash() (tea.Model, tea.Cmd) {
+	m.currentOp++
+	opID := m.currentOp
 	job := flash.Job{
 		Image:      m.guard.image,
 		Target:     m.guard.disk.Path,
@@ -383,7 +422,7 @@ func (m Model) runFlash() (tea.Model, tea.Cmd) {
 		Verify:     m.verify,
 		ScratchDir: m.scratch,
 	}
-	run, ch, cancel := startFlash(m.esc, job, m.guard.disk, m.term)
+	run, ch, cancel := startFlash(opID, m.esc, job, m.guard.disk, m.term)
 
 	m.progressCh = ch
 	m.cancel = cancel
@@ -393,7 +432,7 @@ func (m Model) runFlash() (tea.Model, tea.Cmd) {
 	m.lastErr, m.lastOK = nil, ""
 	m.setStatus(levelWarn, "writing to %s — do not unplug", job.Target)
 
-	return m, tea.Batch(run, awaitProgress(ch), animate())
+	return m, tea.Batch(run, awaitProgress(opID, ch), animate())
 }
 
 func (m Model) keyDirInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -447,7 +486,8 @@ func (m Model) keySeed(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.form.err = ""
 		m.mode = modeFlashing // reuse the busy view while the script runs
 		m.setStatus(levelInfo, "writing configuration…")
-		return m, applySeed(m.esc, m.detection, cfg, m.scratch, m.term)
+		m.currentOp++
+		return m, applySeed(m.currentOp, m.esc, m.detection, cfg, m.scratch, m.term)
 	}
 
 	return m, m.form.update(msg)

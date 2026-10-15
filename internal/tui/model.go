@@ -141,6 +141,9 @@ type Model struct {
 
 	detection seed.Detection
 
+	currentOp int
+	opBusy    bool
+
 	status      string
 	statusLevel level
 }
@@ -187,7 +190,7 @@ func (m Model) selectedDisk() (blockdev.Disk, bool) {
 }
 
 // busy reports whether a long-running operation owns the model.
-func (m Model) busy() bool { return m.flashing }
+func (m Model) busy() bool { return m.flashing || m.opBusy }
 
 func (m *Model) setStatus(l level, format string, args ...any) {
 	m.statusLevel = l
