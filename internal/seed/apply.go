@@ -100,14 +100,21 @@ func buildScript(det Detection, cfg Config, m Mounted, hash string) (string, err
 }
 
 func writeRaspios(b *strings.Builder, cfg Config, hash string) {
+	b.WriteString("# Ensure target directories are not escaping symlinks\n")
+	b.WriteString("for d in \"$BOOT\" \"$ROOT/etc\" \"$ROOT/home\" \"$ROOT/var\"; do\n")
+	b.WriteString("  [ ! -L \"$d\" ] || { echo \"symlink at $d\" >&2; exit 1; }\n")
+	b.WriteString("done\n\n")
+
 	if cfg.EnableSSH {
 		b.WriteString("# sshswitch.service enables sshd when this marker exists.\n")
+		b.WriteString("[ ! -L \"$BOOT/ssh\" ] || { echo \"symlink at $BOOT/ssh\" >&2; exit 1; }\n")
 		b.WriteString("touch \"$BOOT/ssh\"\n\n")
 	}
 	if hash != "" {
 		b.WriteString("# userconfig.service consumes this, then runs\n")
 		b.WriteString("# 'usermod -s /bin/bash', which is what unlocks the stock account:\n")
 		b.WriteString("# it ships with /usr/sbin/nologin, so an SSH key alone is not enough.\n")
+		b.WriteString("[ ! -L \"$BOOT/userconf.txt\" ] || { echo \"symlink at $BOOT/userconf.txt\" >&2; exit 1; }\n")
 		fmt.Fprintf(b, "printf '%%s\\n' %s > \"$BOOT/userconf.txt\"\n",
 			shellQuote(cfg.Username+":"+hash))
 		b.WriteString("chmod 0600 \"$BOOT/userconf.txt\"\n\n")
@@ -118,9 +125,20 @@ func writeRaspios(b *strings.Builder, cfg Config, hash string) {
 		// it, so seeding under the original name stays correct.
 		b.WriteString("# Seeded under the stock home; userconf's 'usermod -m -d' moves it\n")
 		b.WriteString("# if the account is renamed on first boot.\n")
-		b.WriteString("HOME_DIR=\"$(awk -F: '$3==" + firstUID + "{print $6; exit}' \"$ROOT/etc/passwd\")\"\n")
-		b.WriteString("[ -n \"$HOME_DIR\" ] || HOME_DIR=/home/" + cfg.Username + "\n")
+		b.WriteString("HOME_DIR=\"$(awk -F: '$3==" + firstUID + "{print $6; exit}' \"$ROOT/etc/passwd\" 2>/dev/null || true)\"\n")
+		fmt.Fprintf(b, `case "$HOME_DIR" in
+  /home/*)
+    case "$HOME_DIR" in
+      *..*) HOME_DIR="/home/%s" ;;
+    esac
+    ;;
+  *) HOME_DIR="/home/%s" ;;
+esac
+`, cfg.Username, cfg.Username)
 		b.WriteString("SSH_DIR=\"$ROOT$HOME_DIR/.ssh\"\n")
+		b.WriteString("[ ! -L \"$ROOT$HOME_DIR\" ] || { echo \"symlink at $ROOT$HOME_DIR\" >&2; exit 1; }\n")
+		b.WriteString("[ ! -L \"$SSH_DIR\" ] || { echo \"symlink at $SSH_DIR\" >&2; exit 1; }\n")
+		b.WriteString("[ ! -L \"$SSH_DIR/authorized_keys\" ] || { echo \"symlink at authorized_keys\" >&2; exit 1; }\n")
 		fmt.Fprintf(b, "install -d -m 0700 -o %s -g %s \"$SSH_DIR\"\n", firstUID, firstUID)
 		fmt.Fprintf(b, "printf '%%s\\n' %s >> \"$SSH_DIR/authorized_keys\"\n", shellQuote(cfg.AuthorizedKey))
 		fmt.Fprintf(b, "chmod 0600 \"$SSH_DIR/authorized_keys\"\n")
@@ -135,10 +153,11 @@ func writeRaspios(b *strings.Builder, cfg Config, hash string) {
 }
 
 func writeHostname(b *strings.Builder, host string) {
+	b.WriteString("[ ! -L \"$ROOT/etc/hostname\" ] || { echo \"symlink at $ROOT/etc/hostname\" >&2; exit 1; }\n")
 	fmt.Fprintf(b, "printf '%%s\\n' %s > \"$ROOT/etc/hostname\"\n", shellQuote(host))
 	// /etc/hosts must resolve the new name or sudo stalls on every command
 	// while it waits for the lookup to time out.
-	b.WriteString("if [ -f \"$ROOT/etc/hosts\" ]; then\n")
+	b.WriteString("if [ -f \"$ROOT/etc/hosts\" ] && [ ! -L \"$ROOT/etc/hosts\" ]; then\n")
 	fmt.Fprintf(b, "  sed -i \"s/^127\\\\.0\\\\.1\\\\.1.*/127.0.1.1\\t%s/\" \"$ROOT/etc/hosts\"\n", host)
 	fmt.Fprintf(b, "  grep -q '^127\\.0\\.1\\.1' \"$ROOT/etc/hosts\" || printf '127.0.1.1\\t%%s\\n' %s >> \"$ROOT/etc/hosts\"\n", shellQuote(host))
 	b.WriteString("fi\n\n")
@@ -168,12 +187,19 @@ method=auto
 `, cfg.WifiSSID, cfg.WifiSSID, cfg.WifiPSK)
 
 	b.WriteString("# NetworkManager keyfile; it refuses any profile that is not 0600.\n")
+	b.WriteString("[ ! -L \"$ROOT/etc/NetworkManager\" ] || { echo \"symlink at NetworkManager\" >&2; exit 1; }\n")
 	b.WriteString("NM_DIR=\"$ROOT/etc/NetworkManager/system-connections\"\n")
+	b.WriteString("[ ! -L \"$NM_DIR\" ] || { echo \"symlink at system-connections\" >&2; exit 1; }\n")
 	b.WriteString("install -d -m 0755 \"$NM_DIR\"\n")
-	fmt.Fprintf(b, "printf '%%s' %s > \"$NM_DIR/%s.nmconnection\"\n", shellQuote(profile), sanitizeFilename(cfg.WifiSSID))
-	fmt.Fprintf(b, "chmod 0600 \"$NM_DIR/%s.nmconnection\"\n", sanitizeFilename(cfg.WifiSSID))
+	nmFile := sanitizeFilename(cfg.WifiSSID) + ".nmconnection"
+	fmt.Fprintf(b, "NM_FILE=\"$NM_DIR/%s\"\n", nmFile)
+	b.WriteString("[ ! -L \"$NM_FILE\" ] || { echo \"symlink at connection file\" >&2; exit 1; }\n")
+	fmt.Fprintf(b, "printf '%%s' %s > \"$NM_FILE\"\n", shellQuote(profile))
+	b.WriteString("chmod 0600 \"$NM_FILE\"\n")
 	// The regulatory domain gates which channels the radio may use; without it
 	// the 5 GHz band stays disabled on a Pi.
+	b.WriteString("[ ! -L \"$ROOT/etc/default\" ] || { echo \"symlink at default\" >&2; exit 1; }\n")
+	b.WriteString("[ ! -L \"$ROOT/etc/default/crda\" ] || { echo \"symlink at crda\" >&2; exit 1; }\n")
 	fmt.Fprintf(b, "printf 'REGDOMAIN=%%s\\n' %s > \"$ROOT/etc/default/crda\" 2>/dev/null || true\n\n",
 		shellQuote(strings.ToUpper(cfg.WifiCountry)))
 }
@@ -208,11 +234,16 @@ func writeCloudInit(b *strings.Builder, cfg Config, hash string) {
 
 	b.WriteString("# NoCloud seed. cloud-init reads this directory on first boot,\n")
 	b.WriteString("# which avoids having to add a 'cidata' partition to the device.\n")
+	b.WriteString("for d in \"$ROOT/var\" \"$ROOT/var/lib\" \"$ROOT/var/lib/cloud\" \"$ROOT/var/lib/cloud/seed\" \"$ROOT/var/lib/cloud/seed/nocloud-net\"; do\n")
+	b.WriteString("  [ ! -L \"$d\" ] || { echo \"symlink at $d\" >&2; exit 1; }\n")
+	b.WriteString("done\n")
 	b.WriteString("SEED=\"$ROOT/var/lib/cloud/seed/nocloud-net\"\n")
 	b.WriteString("install -d -m 0755 \"$SEED\"\n")
+	b.WriteString("[ ! -L \"$SEED/user-data\" ] || { echo \"symlink at user-data\" >&2; exit 1; }\n")
 	fmt.Fprintf(b, "printf '%%s' %s > \"$SEED/user-data\"\n", shellQuote(ud.String()))
 	// meta-data must exist, even empty, or the NoCloud datasource skips the
 	// directory entirely.
+	b.WriteString("[ ! -L \"$SEED/meta-data\" ] || { echo \"symlink at meta-data\" >&2; exit 1; }\n")
 	fmt.Fprintf(b, "printf '%%s\\n' %s > \"$SEED/meta-data\"\n",
 		shellQuote("instance-id: flashtui-"+cfg.Username))
 	b.WriteString("chmod 0600 \"$SEED/user-data\"\n")
