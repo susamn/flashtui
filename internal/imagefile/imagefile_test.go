@@ -125,6 +125,53 @@ func TestDetectAndExpand(t *testing.T) {
 		assertStream(t, img, raw)
 	})
 
+	t.Run("xz concatenated streams", func(t *testing.T) {
+		p1 := compressWith(t, "xz", []string{"-T0", "-1", "-c"}, dir, "c1.xz", payload(8192))
+		p2 := compressWith(t, "xz", []string{"-T0", "-1", "-c"}, dir, "c2.xz", payload(16384))
+		d1, err := os.ReadFile(p1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d2, err := os.ReadFile(p2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		comb := writeFile(t, dir, "comb.img.xz", append(d1, d2...))
+		img, err := Inspect(comb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if img.Kind != Xz {
+			t.Fatalf("kind=%v", img.Kind)
+		}
+		if img.Expanded != 24576 {
+			t.Errorf("concatenated xz expanded=%d want 24576", img.Expanded)
+		}
+		assertStream(t, img, append(payload(8192), payload(16384)...))
+	})
+
+	t.Run("gzip concatenated streams unknown size", func(t *testing.T) {
+		var buf1, buf2 bytes.Buffer
+		zw1 := gzip.NewWriter(&buf1)
+		zw1.Write(payload(8192))
+		zw1.Close()
+		zw2 := gzip.NewWriter(&buf2)
+		zw2.Write(payload(16384))
+		zw2.Close()
+		comb := writeFile(t, dir, "comb.img.gz", append(buf1.Bytes(), buf2.Bytes()...))
+		img, err := Inspect(comb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if img.Kind != Gzip {
+			t.Fatalf("kind=%v", img.Kind)
+		}
+		if img.ExpandedKnown() {
+			t.Errorf("concatenated gzip must report unknown expanded size, got %d", img.Expanded)
+		}
+		assertStream(t, img, append(payload(8192), payload(16384)...))
+	})
+
 	t.Run("bzip2 size is unknown", func(t *testing.T) {
 		p := compressWith(t, "bzip2", []string{"-c"}, dir, "e.img.bz2", raw)
 		img, err := Inspect(p)

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -251,6 +252,45 @@ func TestProgressFractionAndETA(t *testing.T) {
 	over := Progress{Bytes: 300, Total: 200}
 	if f, _ := over.Fraction(); f != 1 {
 		t.Errorf("fraction=%v want clamp to 1", f)
+	}
+}
+
+func TestWriteAbortsWhenStreamExceedsCapacity(t *testing.T) {
+	dir := t.TempDir()
+	raw := payload(5 << 20)
+	cmd := exec.Command("bzip2", "-c")
+	cmd.Stdin = bytes.NewReader(raw)
+	bzData, err := cmd.Output()
+	if err != nil {
+		t.Skip("bzip2 failed:", err)
+	}
+	p := filepath.Join(dir, "src.img.bz2")
+	if err := os.WriteFile(p, bzData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	img, err := imagefile.Inspect(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.WriteSize() != 0 {
+		t.Fatalf("expected bzip2 to have unknown write size, got %d", img.WriteSize())
+	}
+	target := filepath.Join(dir, "target.dev")
+
+	// Target capacity is smaller than uncompressed raw stream (5 MiB)
+	targetCap := int64(2 << 20)
+	err, _ = runJob(t, Job{
+		Image:      img,
+		Target:     target,
+		TargetSize: targetCap,
+		Verify:     false,
+		ScratchDir: dir,
+	})
+	if err == nil {
+		t.Fatal("expected write to abort when stream exceeds target capacity")
+	}
+	if !errors.Is(err, ErrTargetTooSmall) {
+		t.Fatalf("expected ErrTargetTooSmall, got: %v", err)
 	}
 }
 

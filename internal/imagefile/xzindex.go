@@ -8,61 +8,104 @@ import (
 )
 
 // xzIndexSize reads the uncompressed length out of an .xz stream's index.
-//
-// The layout walked here is, from the end of the file:
-//
-//	Stream Footer  = CRC32(4) | Backward Size(4) | Stream Flags(2) | "YZ"(2)
-//	Index          = 0x00 | record count | { unpadded size, uncompressed size }*
-//
-// Backward Size stores (real size / 4) - 1, and both counters are LZMA
-// multibyte integers. Only the final stream is read: concatenated .xz streams
-// would undercount, so the result is discarded unless it looks sane, and the
-// caller falls back to an indeterminate progress bar.
+// It iterates backwards through every stream in the file so that concatenated
+// .xz files have their uncompressed lengths summed accurately.
+// If any stream is corrupt, truncated, or if the streams do not account for
+// the full file, it returns 0 (unknown).
 func xzIndexSize(f *os.File, size int64) int64 {
 	const footerLen = 12
-	if size < footerLen+2 {
-		return 0
-	}
-	footer := make([]byte, footerLen)
-	if _, err := f.ReadAt(footer, size-footerLen); err != nil {
-		return 0
-	}
-	if !bytes.Equal(footer[10:12], []byte("YZ")) {
-		return 0
-	}
-	backward := (int64(binary.LittleEndian.Uint32(footer[4:8])) + 1) * 4
-	indexStart := size - footerLen - backward
-	if indexStart < 0 || backward > 1<<20 {
-		return 0
-	}
-	index := make([]byte, backward)
-	if _, err := f.ReadAt(index, indexStart); err != nil {
-		return 0
-	}
-	if len(index) == 0 || index[0] != 0x00 {
-		return 0
+	pos := size
+	var totalUncompressed uint64
+
+	for pos > 0 {
+		// 1. Skip 4-byte null padding between streams or at end of file.
+		for pos >= 4 {
+			var pad [4]byte
+			if _, err := f.ReadAt(pad[:], pos-4); err != nil {
+				return 0
+			}
+			if pad != [4]byte{0, 0, 0, 0} {
+				break
+			}
+			pos -= 4
+		}
+		if pos < footerLen*2 { // Must fit at least stream header and footer
+			return 0
+		}
+
+		// 2. Read Stream Footer (12 bytes)
+		footer := make([]byte, footerLen)
+		if _, err := f.ReadAt(footer, pos-footerLen); err != nil {
+			return 0
+		}
+		if !bytes.Equal(footer[10:12], []byte("YZ")) {
+			return 0
+		}
+
+		backward := (int64(binary.LittleEndian.Uint32(footer[4:8])) + 1) * 4
+		indexStart := pos - footerLen - backward
+		if indexStart < footerLen || backward > 1<<20 {
+			return 0
+		}
+
+		index := make([]byte, backward)
+		if _, err := f.ReadAt(index, indexStart); err != nil {
+			return 0
+		}
+		if len(index) == 0 || index[0] != 0x00 {
+			return 0
+		}
+
+		r := bytes.NewReader(index[1:])
+		count, err := readMultibyte(r)
+		if err != nil || count == 0 || count > 1<<20 {
+			return 0
+		}
+
+		var streamUncompressed uint64
+		var streamBlocksPaddedSize uint64
+		for i := uint64(0); i < count; i++ {
+			unpadded, err := readMultibyte(r)
+			if err != nil {
+				return 0
+			}
+			uncompressed, err := readMultibyte(r)
+			if err != nil {
+				return 0
+			}
+			streamUncompressed += uncompressed
+			padded := (unpadded + 3) & ^uint64(3)
+			streamBlocksPaddedSize += padded
+		}
+
+		if streamUncompressed > 1<<62 || totalUncompressed+streamUncompressed > 1<<62 {
+			return 0
+		}
+		totalUncompressed += streamUncompressed
+
+		// 3. Verify stream header at streamStart
+		streamStart := indexStart - int64(streamBlocksPaddedSize) - footerLen
+		if streamStart < 0 {
+			return 0
+		}
+		header := make([]byte, footerLen)
+		if _, err := f.ReadAt(header, streamStart); err != nil {
+			return 0
+		}
+		if !bytes.Equal(header[:6], []byte{0xFD, '7', 'z', 'X', 'Z', 0x00}) {
+			return 0
+		}
+		if !bytes.Equal(header[6:8], footer[8:10]) {
+			return 0
+		}
+
+		pos = streamStart
 	}
 
-	r := bytes.NewReader(index[1:])
-	count, err := readMultibyte(r)
-	if err != nil || count == 0 || count > 1<<20 {
+	if pos != 0 || totalUncompressed > 1<<62 {
 		return 0
 	}
-	var total uint64
-	for i := uint64(0); i < count; i++ {
-		if _, err := readMultibyte(r); err != nil { // unpadded size, unused
-			return 0
-		}
-		uncompressed, err := readMultibyte(r)
-		if err != nil {
-			return 0
-		}
-		total += uncompressed
-	}
-	if total > 1<<62 {
-		return 0
-	}
-	return int64(total)
+	return int64(totalUncompressed)
 }
 
 // readMultibyte decodes an xz multibyte integer: seven bits per byte, little

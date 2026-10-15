@@ -172,7 +172,7 @@ func expandedSize(f *os.File, k Kind, size int64, head []byte) int64 {
 	case Gzip:
 		return gzipISize(f, size)
 	case Zstd:
-		return zstdContentSize(head)
+		return zstdSize(f, size)
 	case Xz:
 		return xzIndexSize(f, size)
 	default:
@@ -181,11 +181,11 @@ func expandedSize(f *os.File, k Kind, size int64, head []byte) int64 {
 	}
 }
 
-// gzipISize reads the trailing ISIZE field. It is the uncompressed length mod
-// 2^32, so it is only trustworthy below 4 GiB; larger images report a wrapped
-// value and are treated as unknown.
+// gzipISize reads the trailing ISIZE field. It verifies the stream is not
+// concatenated and that ISIZE has not wrapped at 4 GiB; otherwise it returns
+// 0 (unknown).
 func gzipISize(f *os.File, size int64) int64 {
-	if size < 18 {
+	if size < 18 || size >= 4<<30 {
 		return 0
 	}
 	buf := make([]byte, 4)
@@ -193,55 +193,157 @@ func gzipISize(f *os.File, size int64) int64 {
 		return 0
 	}
 	v := int64(binary.LittleEndian.Uint32(buf))
-	// A plausible image compresses to less than its own size; if the recorded
-	// value is smaller than the compressed file, ISIZE almost certainly wrapped.
-	if v < size {
+	if v < size || v > size*1032 {
+		return 0
+	}
+	// Check if there are concatenated gzip members. Each member begins with
+	// 0x1F, 0x8B, 0x08 (Deflate). If any other member header exists past offset 0,
+	// the trailer only reflects the last member, so total size is unknown.
+	if gzipHasMultipleMembers(f, size) {
 		return 0
 	}
 	return v
 }
 
-// zstdContentSize reads Frame_Content_Size out of the frame header when the
-// producer chose to record it.
-func zstdContentSize(head []byte) int64 {
-	if len(head) < 6 {
-		return 0
+func gzipHasMultipleMembers(f *os.File, size int64) bool {
+	chunk := make([]byte, 64<<10)
+	var off int64
+	for off < size {
+		n, err := f.ReadAt(chunk, off)
+		if n <= 0 {
+			break
+		}
+		data := chunk[:n]
+		start := 0
+		if off == 0 {
+			start = 2 // skip the leading 0x1F, 0x8B
+		}
+		for i := start; i+2 < len(data); i++ {
+			if data[i] == 0x1F && data[i+1] == 0x8B && data[i+2] == 0x08 {
+				return true
+			}
+		}
+		off += int64(n) - 2 // overlap window in case magic spans boundary
+		if err != nil {
+			break
+		}
 	}
-	fhd := head[4]
-	fcsFlag := fhd >> 6
-	singleSegment := fhd&0x20 != 0
-	if fcsFlag == 0 && !singleSegment {
-		return 0 // field absent
-	}
-	off := 5
-	if !singleSegment {
-		off++ // skip Window_Descriptor
-	}
-	// Dictionary_ID_Flag widens the header; those frames are not produced by
-	// image tooling, so bail rather than guess.
-	if fhd&0x03 != 0 {
-		return 0
-	}
-	sizes := []int{1, 2, 4, 8}
-	n := sizes[fcsFlag]
-	if off+n > len(head) {
-		return 0
-	}
-	b := head[off : off+n]
-	switch n {
-	case 1:
-		return int64(b[0])
-	case 2:
-		return int64(binary.LittleEndian.Uint16(b)) + 256
-	case 4:
-		return int64(binary.LittleEndian.Uint32(b))
-	default:
-		v := binary.LittleEndian.Uint64(b)
-		if v > 1<<62 {
+	return false
+}
+
+// zstdSize scans all frames in a zstd stream to compute the total uncompressed
+// size. If any frame lacks Frame_Content_Size or is corrupt, it returns 0.
+func zstdSize(f *os.File, size int64) int64 {
+	var pos int64
+	var totalUncompressed uint64
+
+	buf := make([]byte, 32)
+	for pos < size {
+		if pos+4 > size {
 			return 0
 		}
-		return int64(v)
+		if _, err := f.ReadAt(buf[:4], pos); err != nil {
+			return 0
+		}
+		magic := binary.LittleEndian.Uint32(buf[:4])
+		// Handle skippable frames: 0x184D2A50 - 0x184D2A5F
+		if magic >= 0x184D2A50 && magic <= 0x184D2A5F {
+			if pos+8 > size {
+				return 0
+			}
+			if _, err := f.ReadAt(buf[:4], pos+4); err != nil {
+				return 0
+			}
+			skipLen := int64(binary.LittleEndian.Uint32(buf[:4]))
+			pos += 8 + skipLen
+			continue
+		}
+		if magic != 0xFD2FB528 { // 0x28, 0xB5, 0x2F, 0xFD
+			return 0
+		}
+		if pos+5 > size {
+			return 0
+		}
+		if _, err := f.ReadAt(buf[:1], pos+4); err != nil {
+			return 0
+		}
+		fhd := buf[0]
+		if fhd&0x08 != 0 { // reserved bit must be 0
+			return 0
+		}
+		singleSegment := fhd&0x20 != 0
+		fcsFlag := fhd >> 6
+		hasChecksum := fhd&0x04 != 0
+		dictIDFlag := fhd & 0x03
+
+		if fcsFlag == 0 && !singleSegment {
+			return 0 // Frame_Content_Size absent
+		}
+
+		headerLen := int64(5)
+		if !singleSegment {
+			headerLen++ // Window_Descriptor
+		}
+		dictSizes := []int64{0, 1, 2, 4}
+		headerLen += dictSizes[dictIDFlag]
+
+		var fcsBytes int64
+		if fcsFlag == 0 && singleSegment {
+			fcsBytes = 1
+		} else {
+			fcsBytes = int64([]int{0, 2, 4, 8}[fcsFlag])
+		}
+
+		if pos+headerLen+fcsBytes > size {
+			return 0
+		}
+		fcsBuf := make([]byte, fcsBytes)
+		if _, err := f.ReadAt(fcsBuf, pos+headerLen); err != nil {
+			return 0
+		}
+		var fcs uint64
+		switch fcsBytes {
+		case 1:
+			fcs = uint64(fcsBuf[0])
+		case 2:
+			fcs = uint64(binary.LittleEndian.Uint16(fcsBuf)) + 256
+		case 4:
+			fcs = uint64(binary.LittleEndian.Uint32(fcsBuf))
+		case 8:
+			fcs = binary.LittleEndian.Uint64(fcsBuf)
+		}
+		totalUncompressed += fcs
+		headerLen += fcsBytes
+
+		// Walk blocks until last block
+		blockPos := pos + headerLen
+		lastBlock := false
+		for !lastBlock {
+			if blockPos+3 > size {
+				return 0
+			}
+			var b [3]byte
+			if _, err := f.ReadAt(b[:], blockPos); err != nil {
+				return 0
+			}
+			lastBlock = (b[0] & 1) != 0
+			blockType := (b[0] >> 1) & 0x03
+			if blockType == 3 { // reserved
+				return 0
+			}
+			blockSize := int64(b[0]>>3) | (int64(b[1]) << 5) | (int64(b[2]) << 13)
+			blockPos += 3 + blockSize
+		}
+		if hasChecksum {
+			blockPos += 4
+		}
+		pos = blockPos
 	}
+
+	if pos != size || totalUncompressed > 1<<62 {
+		return 0
+	}
+	return int64(totalUncompressed)
 }
 
 // Reader opens the image and returns a stream of uncompressed bytes. The
