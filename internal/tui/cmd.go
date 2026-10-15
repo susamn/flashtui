@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,6 +20,12 @@ import (
 // card can legitimately take a very long time.
 const opTimeout = 60 * time.Second
 
+// unmountAll is swapped out in tests.
+var unmountAll = mountctl.UnmountAll
+
+// mountPart is swapped out in tests.
+var mountPart = mountctl.Mount
+
 func scanImages(dir string) tea.Cmd {
 	return func() tea.Msg {
 		imgs, err := imagefile.Scan(dir)
@@ -32,7 +40,7 @@ func listDisks() tea.Cmd {
 	}
 }
 
-func mountDisk(disk blockdev.Disk) tea.Cmd {
+func mountDisk(opID int, disk blockdev.Disk) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 		defer cancel()
@@ -49,32 +57,32 @@ func mountDisk(disk blockdev.Disk) tea.Cmd {
 			last = mp
 		}
 		if mounted == 0 {
-			return mountMsg{action: "mount", err: errNothingMounted}
+			return mountMsg{opID: opID, action: "mount", err: errNothingMounted}
 		}
-		return mountMsg{action: "mount", detail: sprintf("%d partition(s), last at %s", mounted, last)}
+		return mountMsg{opID: opID, action: "mount", detail: sprintf("%d partition(s), last at %s", mounted, last)}
 	}
 }
 
-func unmountDisk(disk blockdev.Disk) tea.Cmd {
+func unmountDisk(opID int, disk blockdev.Disk) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 		defer cancel()
-		err := mountctl.UnmountAll(ctx, partitionPaths(disk))
-		return mountMsg{action: "unmount", detail: disk.Path, err: err}
+		err := unmountAll(ctx, partitionPaths(disk))
+		return mountMsg{opID: opID, action: "unmount", detail: disk.Path, err: err}
 	}
 }
 
-func powerOffDisk(disk blockdev.Disk) tea.Cmd {
+func powerOffDisk(opID int, disk blockdev.Disk) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 		defer cancel()
 		// Powering off a disk with mounted filesystems loses whatever is still
 		// in the page cache, so release them first.
-		if err := mountctl.UnmountAll(ctx, partitionPaths(disk)); err != nil {
-			return mountMsg{action: "power off", err: err}
+		if err := unmountAll(ctx, partitionPaths(disk)); err != nil {
+			return mountMsg{opID: opID, action: "power off", err: err}
 		}
 		err := mountctl.PowerOff(ctx, disk.Path)
-		return mountMsg{action: "power off", detail: disk.Path, err: err}
+		return mountMsg{opID: opID, action: "power off", detail: disk.Path, err: err}
 	}
 }
 
@@ -91,7 +99,7 @@ func partitionPaths(d blockdev.Disk) []string {
 //
 // The returned cancel stops the write; the caller keeps it so the user can
 // abort.
-func startFlash(esc *privilege.Escalator, job flash.Job, disk blockdev.Disk, term *terminal) (tea.Cmd, chan flash.Progress, context.CancelFunc) {
+func startFlash(opID int, esc *privilege.Escalator, job flash.Job, disk blockdev.Disk, term *terminal) (tea.Cmd, chan flash.Progress, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	updates := make(chan flash.Progress, 64)
 
@@ -101,18 +109,50 @@ func startFlash(esc *privilege.Escalator, job flash.Job, disk blockdev.Disk, ter
 	job.OnAuthenticated = term.restore
 
 	run := func() tea.Msg {
+		// Revalidate target device identity and safety before unmounting or writing
+		freshDisks, err := blockdev.List()
+		if err != nil {
+			close(updates)
+			return flashDoneMsg{opID: opID, target: job.Target, err: fmt.Errorf("revalidate target: %w", err)}
+		}
+		var freshDisk *blockdev.Disk
+		for _, d := range freshDisks {
+			if d.Path == job.Target {
+				freshDisk = &d
+				break
+			}
+		}
+		if freshDisk == nil {
+			close(updates)
+			return flashDoneMsg{opID: opID, target: job.Target, err: errors.New("target device disappeared before write")}
+		}
+		if freshDisk.System {
+			close(updates)
+			return flashDoneMsg{opID: opID, target: job.Target, err: errors.New("target device is a system disk; write refused")}
+		}
+		if freshDisk.ReadOnly {
+			close(updates)
+			return flashDoneMsg{opID: opID, target: job.Target, err: errors.New("target device is read-only; write refused")}
+		}
+		if disk.Size > 0 && freshDisk.Size != disk.Size {
+			close(updates)
+			return flashDoneMsg{opID: opID, target: job.Target, err: errors.New("target device size changed; device was replaced")}
+		}
+
 		term.release()
+		defer term.restore()
+
 		// Writing to a disk whose filesystems are mounted corrupts the
 		// kernel's cached view of them, so this has to succeed first.
 		uctx, ucancel := context.WithTimeout(ctx, opTimeout)
-		err := mountctl.UnmountAll(uctx, partitionPaths(disk))
+		err = unmountAll(uctx, partitionPaths(*freshDisk))
 		ucancel()
 		if err != nil {
 			close(updates)
-			return flashDoneMsg{target: job.Target, err: err}
+			return flashDoneMsg{opID: opID, target: job.Target, err: err}
 		}
 		err = flash.Run(ctx, esc, job, updates)
-		return flashDoneMsg{target: job.Target, err: err}
+		return flashDoneMsg{opID: opID, target: job.Target, err: err}
 	}
 
 	return run, updates, cancel
@@ -121,30 +161,32 @@ func startFlash(esc *privilege.Escalator, job flash.Job, disk blockdev.Disk, ter
 // awaitProgress yields the next sample and is re-issued by Update after each
 // one, which is how a channel is bridged into the Elm loop. A closed channel
 // yields nil, which tea discards.
-func awaitProgress(ch chan flash.Progress) tea.Cmd {
+func awaitProgress(opID int, ch chan flash.Progress) tea.Cmd {
 	return func() tea.Msg {
 		p, ok := <-ch
 		if !ok {
 			return nil
 		}
-		return progressMsg(p)
+		return progressMsg{opID: opID, progress: p}
 	}
 }
 
 // detectAfterFlash re-reads the partition table the write just created, then
 // classifies what first-boot mechanism the image exposes.
-func detectAfterFlash(target string) tea.Cmd {
+func detectAfterFlash(opID int, target string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 		defer cancel()
 
 		// The flash script already ran partprobe as root; this only waits for
 		// udev to catch up, so it needs no second escalation.
-		mountctl.Settle(ctx)
+		if err := mountctl.Settle(ctx); err != nil {
+			return detectMsg{opID: opID, err: err}
+		}
 
 		disks, err := blockdev.List()
 		if err != nil {
-			return detectMsg{err: err}
+			return detectMsg{opID: opID, err: err}
 		}
 		var disk blockdev.Disk
 		for _, d := range disks {
@@ -153,7 +195,7 @@ func detectAfterFlash(target string) tea.Cmd {
 			}
 		}
 		if disk.Path == "" {
-			return detectMsg{err: errTargetGone}
+			return detectMsg{opID: opID, err: errTargetGone}
 		}
 		det := seed.Detect(disk, func(part string) (string, func(), error) {
 			mp, err := mountctl.Mount(ctx, part)
@@ -166,14 +208,14 @@ func detectAfterFlash(target string) tea.Cmd {
 				_ = mountctl.Unmount(uctx, part)
 			}, nil
 		})
-		return detectMsg{detection: det}
+		return detectMsg{opID: opID, detection: det}
 	}
 }
 
 // applySeed mounts what the detection named, writes the configuration, then
 // unmounts again so the card is safe to pull.
-func applySeed(esc *privilege.Escalator, det seed.Detection, cfg seed.Config, scratch string, term *terminal) tea.Cmd {
-	return func() tea.Msg {
+func applySeed(opID int, esc *privilege.Escalator, det seed.Detection, cfg seed.Config, scratch string, term *terminal) tea.Cmd {
+	return func() (msg tea.Msg) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
@@ -185,7 +227,7 @@ func applySeed(esc *privilege.Escalator, det seed.Detection, cfg seed.Config, sc
 		var m seed.Mounted
 		var toUnmount []string
 		mount := func(part string) (string, error) {
-			mp, err := mountctl.Mount(ctx, part)
+			mp, err := mountPart(ctx, part)
 			if err != nil {
 				return "", err
 			}
@@ -195,23 +237,27 @@ func applySeed(esc *privilege.Escalator, det seed.Detection, cfg seed.Config, sc
 		defer func() {
 			uctx, ucancel := context.WithTimeout(context.Background(), opTimeout)
 			defer ucancel()
-			_ = mountctl.UnmountAll(uctx, toUnmount)
+			if uerr := unmountAll(uctx, toUnmount); uerr != nil {
+				if smsg, ok := msg.(seedDoneMsg); ok && smsg.err == nil {
+					msg = seedDoneMsg{opID: opID, err: fmt.Errorf("seed applied, but cleanup unmount failed: %w", uerr)}
+				}
+			}
 		}()
 
 		if det.Boot != "" {
 			mp, err := mount(det.Boot)
 			if err != nil {
-				return seedDoneMsg{err: err}
+				return seedDoneMsg{opID: opID, err: err}
 			}
 			m.Boot = mp
 		}
 		mp, err := mount(det.Root)
 		if err != nil {
-			return seedDoneMsg{err: err}
+			return seedDoneMsg{opID: opID, err: err}
 		}
 		m.Root = mp
 
-		return seedDoneMsg{err: seed.Apply(ctx, esc, det, cfg, m, scratch)}
+		return seedDoneMsg{opID: opID, err: seed.Apply(ctx, esc, det, cfg, m, scratch)}
 	}
 }
 

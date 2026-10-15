@@ -83,8 +83,12 @@ func PowerOff(ctx context.Context, disk string) error {
 // table that was just rewritten. It needs no privileges, which matters: the
 // flash script already ran partprobe as root, and escalating again here would
 // cost the user a second password prompt for nothing.
-func Settle(ctx context.Context) {
-	_, _ = run(ctx, "udevadm", "settle", "--timeout=10")
+func Settle(ctx context.Context) error {
+	out, err := run(ctx, "udevadm", "settle", "--timeout=10")
+	if err != nil {
+		return fmt.Errorf("udevadm settle: %w: %s", err, firstLine(out))
+	}
+	return nil
 }
 
 // existingMount asks lsblk where a partition is mounted, for the paths where
