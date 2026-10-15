@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Escalator builds privileged commands.
@@ -55,15 +57,28 @@ func (e *Escalator) Command(ctx context.Context, name string, args ...string) (*
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
+	var cmd *exec.Cmd
 	if e.amRoot {
-		return exec.CommandContext(ctx, target, args...), nil
+		cmd = exec.CommandContext(ctx, target, args...)
+	} else {
+		// pkexec prompts through a polkit agent when one is running and through its
+		// own text agent on the controlling tty when one is not. Either way the
+		// caller must release the terminal first, or a raw-mode TUI will eat the
+		// prompt. See tui.releaseTerminal.
+		full := append([]string{target}, args...)
+		cmd = exec.CommandContext(ctx, e.pkexecPath, full...)
 	}
-	// pkexec prompts through a polkit agent when one is running and through its
-	// own text agent on the controlling tty when one is not. Either way the
-	// caller must release the terminal first, or a raw-mode TUI will eat the
-	// prompt. See tui.releaseTerminal.
-	full := append([]string{target}, args...)
-	return exec.CommandContext(ctx, e.pkexecPath, full...), nil
+	// Terminate the entire process group upon cancellation so child shells
+	// and dd processes are reaped rather than orphaned.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 3 * time.Second
+	return cmd, nil
 }
 
 // Describe renders the command line that would run, for display in a

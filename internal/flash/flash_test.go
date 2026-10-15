@@ -196,6 +196,29 @@ func TestVerifyAcceptsIntactDevice(t *testing.T) {
 	}
 }
 
+func TestEarlyFailureInvokesOnAuthenticated(t *testing.T) {
+	dir := t.TempDir()
+	img := imageOf(t, dir, "src.img", payload(8<<20))
+	target := filepath.Join(dir, "target.dev")
+
+	var authenticatedCalled bool
+	ch := make(chan Progress, 16)
+	job := Job{
+		Image:           img,
+		Target:          target,
+		TargetSize:      1 << 20, // too small, fails before start
+		ScratchDir:      dir,
+		OnAuthenticated: func() { authenticatedCalled = true },
+	}
+	err := Run(context.Background(), privilege.Direct(), job, ch)
+	if !errors.Is(err, ErrTargetTooSmall) {
+		t.Fatalf("expected ErrTargetTooSmall, got: %v", err)
+	}
+	if !authenticatedCalled {
+		t.Fatal("OnAuthenticated must be invoked on early failure to restore terminal")
+	}
+}
+
 func TestRefusesTargetTooSmall(t *testing.T) {
 	dir := t.TempDir()
 	img := imageOf(t, dir, "src.img", payload(8<<20))

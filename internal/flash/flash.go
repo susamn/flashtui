@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -119,6 +120,9 @@ var ErrTargetTooSmall = errors.New("image is larger than the target device")
 // buildScript for why.
 func Run(ctx context.Context, esc *privilege.Escalator, job Job, updates chan<- Progress) error {
 	defer close(updates)
+	if job.OnAuthenticated != nil {
+		defer job.OnAuthenticated()
+	}
 
 	// Refuse up front rather than filling the device and failing with ENOSPC
 	// partway through, which leaves an unbootable half-written disk.
@@ -186,13 +190,18 @@ func Run(ctx context.Context, esc *privilege.Escalator, job Job, updates chan<- 
 	waitErr := cmd.Wait()
 
 	switch {
+	case waitErr != nil && privilege.ErrDenied(waitErr):
+		return errors.New("authorisation denied; nothing was written")
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case waitErr != nil:
+		errMsg := strings.TrimSpace(stderr.String())
+		if errMsg != "" {
+			return fmt.Errorf("write failed: %w: %s", waitErr, errMsg)
+		}
+		return fmt.Errorf("write failed: %w", waitErr)
 	case copyErr != nil:
 		return copyErr
-	case waitErr != nil:
-		if privilege.ErrDenied(waitErr) {
-			return errors.New("authorisation denied; nothing was written")
-		}
-		return fmt.Errorf("write failed: %w: %s", waitErr, stderr.String())
 	case closeErr != nil:
 		return fmt.Errorf("closing writer input: %w", closeErr)
 	case verifyErr != nil:
