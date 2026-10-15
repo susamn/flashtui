@@ -193,6 +193,39 @@ func TestApplyRefusesSymlinkedDirectories(t *testing.T) {
 	}
 }
 
+func TestApplyRefusesIntermediateComponentSymlinks(t *testing.T) {
+	requireSeedableUID(t)
+	fakeHasher(t)
+
+	root := makeLinuxRoot(t)
+	extTarget := t.TempDir()
+	canary := filepath.Join(extTarget, "nocloud-net", "user-data")
+
+	// Intermediate component: /var/lib/cloud/seed -> extTarget
+	if err := os.MkdirAll(filepath.Join(root, "var", "lib", "cloud"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(extTarget, filepath.Join(root, "var", "lib", "cloud", "seed")); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{
+		Username:      "ubuntu",
+		Password:      "pw",
+		AuthorizedKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample susamn@arch",
+		Hostname:      "cloudbox",
+	}
+
+	err := Apply(context.Background(), privilege.Direct(),
+		Detection{Family: CloudInit, Root: "/dev/sda1"}, cfg, Mounted{Root: root}, t.TempDir())
+	if err == nil {
+		t.Fatal("expected Apply to fail when intermediate directory /var/lib/cloud/seed is a symlink")
+	}
+	if _, err := os.Stat(canary); err == nil {
+		t.Fatal("escaped write occurred through intermediate symlink")
+	}
+}
+
 func readFile(t *testing.T, p string) string {
 	t.Helper()
 	b, err := os.ReadFile(p)

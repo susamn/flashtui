@@ -234,12 +234,10 @@ func writeCloudInit(b *strings.Builder, cfg Config, hash string) {
 
 	b.WriteString("# NoCloud seed. cloud-init reads this directory on first boot,\n")
 	b.WriteString("# which avoids having to add a 'cidata' partition to the device.\n")
-	b.WriteString("for d in \"$ROOT/var\" \"$ROOT/var/lib\"; do\n")
+	b.WriteString("for d in \"$ROOT/var\" \"$ROOT/var/lib\" \"$ROOT/var/lib/cloud\" \"$ROOT/var/lib/cloud/seed\" \"$ROOT/var/lib/cloud/seed/nocloud-net\"; do\n")
 	b.WriteString("  [ ! -L \"$d\" ] || { echo \"symlink at $d\" >&2; exit 1; }\n")
 	b.WriteString("done\n")
 	b.WriteString("SEED=\"$ROOT/var/lib/cloud/seed/nocloud-net\"\n")
-	b.WriteString("[ ! -L \"$ROOT/var/lib/cloud\" ] || { echo \"symlink at cloud\" >&2; exit 1; }\n")
-	b.WriteString("[ ! -L \"$SEED\" ] || { echo \"symlink at seed\" >&2; exit 1; }\n")
 	b.WriteString("install -d -m 0755 \"$SEED\"\n")
 	b.WriteString("[ ! -L \"$SEED/user-data\" ] || { echo \"symlink at user-data\" >&2; exit 1; }\n")
 	fmt.Fprintf(b, "printf '%%s' %s > \"$SEED/user-data\"\n", shellQuote(ud.String()))
