@@ -275,6 +275,10 @@ func (m Model) keyBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
+		if d.System {
+			m.setStatus(levelError, "refusing to unmount the system disk")
+			return m, nil
+		}
 		m.setStatus(levelInfo, "unmounting %s…", d.Path)
 		return m, unmountDisk(d)
 

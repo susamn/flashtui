@@ -102,6 +102,74 @@ func TestListPropagatesCommandError(t *testing.T) {
 	}
 }
 
+func TestSystemDiskDetectedThroughBindAndSubmounts(t *testing.T) {
+	orig := runner
+	runner = func(name string, args ...string) ([]byte, error) {
+		jsonOut := `{
+			"blockdevices": [
+				{
+					"name": "/dev/sdb", "path": "/dev/sdb", "type": "disk", "size": 64000000000,
+					"children": [
+						{
+							"name": "/dev/sdb1", "path": "/dev/sdb1", "type": "part", "size": 32000000000,
+							"mountpoints": ["/mnt/data", "/var/log"]
+						}
+					]
+				},
+				{
+					"name": "/dev/sdc", "path": "/dev/sdc", "type": "disk", "size": 64000000000,
+					"children": [
+						{
+							"name": "/dev/sdc1", "path": "/dev/sdc1", "type": "part", "size": 32000000000,
+							"fstype": "swap", "mountpoint": "[SWAP]"
+						}
+					]
+				}
+			]
+		}`
+		return []byte(jsonOut), nil
+	}
+	t.Cleanup(func() { runner = orig })
+
+	disks, err := List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sdb := find(t, disks, "sdb")
+	if !sdb.System {
+		t.Error("disk with /var/log bind mount must be flagged System")
+	}
+	sdc := find(t, disks, "sdc")
+	if !sdc.System {
+		t.Error("disk with swap partition must be flagged System")
+	}
+}
+
+func TestListFallbackWhenMountpointsUnknown(t *testing.T) {
+	calls := 0
+	orig := runner
+	runner = func(name string, args ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("lsblk: unknown column: MOUNTPOINTS")
+		}
+		jsonOut := `{"blockdevices": []}`
+		return []byte(jsonOut), nil
+	}
+	t.Cleanup(func() { runner = orig })
+
+	disks, err := List()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(disks) != 0 {
+		t.Errorf("expected empty disks, got %d", len(disks))
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 calls for fallback, got %d", calls)
+	}
+}
+
 func TestListRejectsGarbage(t *testing.T) {
 	orig := runner
 	runner = func(string, ...string) ([]byte, error) { return []byte("not json"), nil }
