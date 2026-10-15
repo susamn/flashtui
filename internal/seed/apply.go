@@ -104,12 +104,19 @@ func writeRaspios(b *strings.Builder, cfg Config, hash string) {
 		b.WriteString("# sshswitch.service enables sshd when this marker exists.\n")
 		b.WriteString("touch \"$BOOT/ssh\"\n\n")
 	}
-	if hash != "" {
+	userconfHash := hash
+	if userconfHash == "" && cfg.AuthorizedKey != "" {
+		// When only an SSH key is provided, write userconf.txt with a disabled
+		// password hash ("*") so userconfig-pi still creates/renames the user,
+		// sets shell to /bin/bash, and unlocks the account for key-only access.
+		userconfHash = "*"
+	}
+	if userconfHash != "" {
 		b.WriteString("# userconfig.service consumes this, then runs\n")
 		b.WriteString("# 'usermod -s /bin/bash', which is what unlocks the stock account:\n")
 		b.WriteString("# it ships with /usr/sbin/nologin, so an SSH key alone is not enough.\n")
 		fmt.Fprintf(b, "printf '%%s\\n' %s > \"$BOOT/userconf.txt\"\n",
-			shellQuote(cfg.Username+":"+hash))
+			shellQuote(cfg.Username+":"+userconfHash))
 		b.WriteString("chmod 0600 \"$BOOT/userconf.txt\"\n\n")
 	}
 	if cfg.AuthorizedKey != "" {
@@ -216,6 +223,23 @@ func writeCloudInit(b *strings.Builder, cfg Config, hash string) {
 	fmt.Fprintf(b, "printf '%%s\\n' %s > \"$SEED/meta-data\"\n",
 		shellQuote("instance-id: flashtui-"+cfg.Username))
 	b.WriteString("chmod 0600 \"$SEED/user-data\"\n")
+
+	if cfg.WifiSSID != "" {
+		var nc strings.Builder
+		nc.WriteString("version: 2\n")
+		nc.WriteString("wifis:\n")
+		nc.WriteString("  wifinet0:\n")
+		nc.WriteString("    match:\n")
+		nc.WriteString("      name: \"wl*\"\n")
+		nc.WriteString("    access-points:\n")
+		fmt.Fprintf(&nc, "      %s:\n", yamlString(cfg.WifiSSID))
+		fmt.Fprintf(&nc, "        password: %s\n", yamlString(cfg.WifiPSK))
+		nc.WriteString("    dhcp4: true\n")
+
+		fmt.Fprintf(b, "printf '%%s' %s > \"$SEED/network-config\"\n", shellQuote(nc.String()))
+		b.WriteString("chmod 0600 \"$SEED/network-config\"\n")
+	}
+
 	// A previous boot of the same image would otherwise make cloud-init skip
 	// the new seed as already applied.
 	b.WriteString("rm -rf \"$ROOT/var/lib/cloud/instance\" \"$ROOT/var/lib/cloud/instances\" 2>/dev/null || true\n")

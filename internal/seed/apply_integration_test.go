@@ -90,6 +90,31 @@ func TestApplyRaspiosWritesEverything(t *testing.T) {
 	assertMode(t, nm, 0o600)
 }
 
+func TestApplyRaspiosKeyOnlyWritesLockedUserconf(t *testing.T) {
+	requireSeedableUID(t)
+
+	boot, root := makeRaspiBoot(t), makeLinuxRoot(t)
+	cfg := Config{
+		Username:      "susamn",
+		AuthorizedKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample susamn@arch",
+		Hostname:      "pi-keyonly",
+		EnableSSH:     true,
+	}
+	det := Detection{Family: RaspberryPiOS, Boot: "/dev/sda1", Root: "/dev/sda2"}
+
+	err := Apply(context.Background(), privilege.Direct(), det, cfg,
+		Mounted{Boot: boot, Root: root}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	uc := readFile(t, filepath.Join(boot, "userconf.txt"))
+	if want := "susamn:*\n"; uc != want {
+		t.Errorf("userconf.txt for key-only = %q want %q", uc, want)
+	}
+	assertMode(t, filepath.Join(boot, "userconf.txt"), 0o600)
+}
+
 func TestApplyCloudInitWritesSeed(t *testing.T) {
 	requireSeedableUID(t)
 	fakeHasher(t)
@@ -120,6 +145,36 @@ func TestApplyCloudInitWritesSeed(t *testing.T) {
 		t.Errorf("meta-data = %q", md)
 	}
 	assertMode(t, filepath.Join(seedDir, "user-data"), 0o600)
+}
+
+func TestApplyCloudInitWritesNetworkConfig(t *testing.T) {
+	requireSeedableUID(t)
+	fakeHasher(t)
+
+	root := makeLinuxRoot(t)
+	cfg := Config{
+		Username:      "ubuntu",
+		Password:      "pw",
+		AuthorizedKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample susamn@arch",
+		Hostname:      "cloudbox",
+		WifiSSID:      "MyNetwork",
+		WifiPSK:       "secretpsk123",
+		WifiCountry:   "US",
+	}
+	err := Apply(context.Background(), privilege.Direct(),
+		Detection{Family: CloudInit, Root: "/dev/sda1"}, cfg, Mounted{Root: root}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedDir := filepath.Join(root, "var", "lib", "cloud", "seed", "nocloud-net")
+	nc := readFile(t, filepath.Join(seedDir, "network-config"))
+	for _, want := range []string{"version: 2", "wifinet0", "MyNetwork", "secretpsk123"} {
+		if !strings.Contains(nc, want) {
+			t.Errorf("network-config missing %q:\n%s", want, nc)
+		}
+	}
+	assertMode(t, filepath.Join(seedDir, "network-config"), 0o600)
 }
 
 // A password or SSID containing shell metacharacters must land verbatim, not
