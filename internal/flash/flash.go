@@ -167,7 +167,7 @@ func Run(ctx context.Context, esc *privilege.Escalator, job Job, updates chan<- 
 
 	// Phase 1: stream the image in, hashing as it goes.
 	h := sha256.New()
-	written, copyErr := pump(ctx, stdin, src, h, job.Image.WriteSize(), PhaseWriting, updates)
+	written, copyErr := pump(ctx, stdin, src, h, job.Image.WriteSize(), job.TargetSize, PhaseWriting, updates)
 	// Closing stdin is what tells dd to finish and fsync; it must happen even
 	// on a copy error, or Wait blocks forever.
 	closeErr := stdin.Close()
@@ -223,7 +223,7 @@ func stageScript(job Job) (string, func(), error) {
 func readBack(ctx context.Context, stdout io.Reader, written int64, want []byte, updates chan<- Progress) error {
 	h := sha256.New()
 	// dd pads the final block, so only the first `written` bytes take part.
-	n, err := pump(ctx, io.Discard, io.LimitReader(stdout, written), h, written, PhaseVerifying, updates)
+	n, err := pump(ctx, io.Discard, io.LimitReader(stdout, written), h, written, 0, PhaseVerifying, updates)
 	// Drain the padding so the child is never killed by SIGPIPE on a short read.
 	_, _ = io.Copy(io.Discard, stdout)
 	if err != nil {
@@ -239,8 +239,8 @@ func readBack(ctx context.Context, stdout io.Reader, written int64, want []byte,
 }
 
 // pump copies src to dst, feeding every byte through h, and emits throttled
-// progress. It returns the number of bytes copied.
-func pump(ctx context.Context, dst io.Writer, src io.Reader, h hash.Hash, total int64, phase Phase, updates chan<- Progress) (int64, error) {
+// progress. It stops and reports ErrTargetTooSmall if the stream exceeds targetCap.
+func pump(ctx context.Context, dst io.Writer, src io.Reader, h hash.Hash, total, targetCap int64, phase Phase, updates chan<- Progress) (int64, error) {
 	buf := make([]byte, blockSize)
 	var n int64
 	start := time.Now()
@@ -256,6 +256,9 @@ func pump(ctx context.Context, dst io.Writer, src io.Reader, h hash.Hash, total 
 
 		read, rerr := src.Read(buf)
 		if read > 0 {
+			if targetCap > 0 && n+int64(read) > targetCap {
+				return n, fmt.Errorf("%w: stream exceeded target capacity of %d bytes", ErrTargetTooSmall, targetCap)
+			}
 			chunk := buf[:read]
 			h.Write(chunk)
 			if _, werr := dst.Write(chunk); werr != nil {
