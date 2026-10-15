@@ -38,9 +38,24 @@ target device and optional headless first-boot setup.
 brew install susamn/tap/flashtui
 ```
 
-A prebuilt Linux binary, so no Go toolchain is needed. See `## Requirements`
-below for the system tools flashtui drives -- in particular, do not install
-Homebrew's util-linux.
+Prebuilt binaries are available for Linux amd64 and arm64; no Go toolchain
+is needed. Install the distro packages listed under [Requirements](#requirements)
+first—do not substitute Homebrew's util-linux.
+
+Run the installed tool as your normal user in an interactive terminal:
+
+```sh
+flashtui -version
+flashtui                       # scans ~/Downloads
+flashtui -dir /path/to/images
+```
+
+To update it after a new release:
+
+```sh
+brew update
+brew upgrade susamn/tap/flashtui
+```
 
 Or build it yourself:
 
@@ -138,8 +153,38 @@ read.
 
 ## Requirements
 
-- Linux, with `udisks2`, `polkit` and util-linux.
-- `mkpasswd` (from `whois`) or `openssl`, for SHA-512 password hashes.
+Linux with a standard shell/core utilities (`sh`, `dd`, `awk`, `sync`) and:
+
+| Tool | Package / purpose |
+| --- | --- |
+| `lsblk` | distro util-linux; enumerate disks and filesystems |
+| `udisksctl` | udisks2; mount, unmount and power off drives |
+| `pkexec` | polkit (Debian: `pkexec` and `polkitd`); authorize privileged writes |
+| `partprobe` | parted; refresh the partition table after flashing |
+| `udevadm` | systemd/udev; wait for device discovery |
+| `openssl` or `mkpasswd` | openssl or whois; hash passwords for headless setup |
+
+Install using your distribution's package manager:
+
+```sh
+# Arch
+sudo pacman -S util-linux systemd polkit udisks2 parted openssl
+
+# Debian / Ubuntu
+sudo apt install util-linux udev pkexec polkitd udisks2 parted openssl
+
+# Fedora
+sudo dnf install util-linux systemd-udev polkit udisks2 parted openssl
+```
+
+udisks2 must be available through the system D-Bus. Mount permissions depend on
+your session's polkit policy; installing the binary alone does not configure a
+headless session's authorization. A graphical polkit agent is optional because
+`pkexec` can prompt in the terminal. Do not run the whole TUI with `sudo`.
+
+Decompression is built into flashtui; external `xz`, `gzip`, `zstd` and `bzip2`
+executables are not required. The password hasher is needed only when headless
+setup includes a password.
 
 flashtui prefers `/usr/bin/lsblk` over any `lsblk` earlier on `PATH`. A
 Homebrew build is not linked against libudev and silently reports no filesystem
