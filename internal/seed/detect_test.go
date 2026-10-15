@@ -53,6 +53,18 @@ func makeLinuxRoot(t *testing.T) string {
 	return d
 }
 
+func makeCloudInitRoot(t *testing.T) string {
+	t.Helper()
+	d := makeLinuxRoot(t)
+	if err := os.MkdirAll(filepath.Join(d, "etc", "cloud"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "etc", "cloud", "cloud.cfg"), []byte("#cloud-config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 func TestDetectRaspberryPiOS(t *testing.T) {
 	boot, root := makeRaspiBoot(t), makeLinuxRoot(t)
 	disk := fakeDisk(
@@ -69,7 +81,7 @@ func TestDetectRaspberryPiOS(t *testing.T) {
 }
 
 func TestDetectCloudInit(t *testing.T) {
-	root := makeLinuxRoot(t)
+	root := makeCloudInitRoot(t)
 	disk := fakeDisk(blockdev.Partition{Path: "/dev/sda1", FSType: "ext4"})
 	got := Detect(disk, mounter(map[string]string{"/dev/sda1": root}))
 	if got.Family != CloudInit || got.Root != "/dev/sda1" {
@@ -77,6 +89,18 @@ func TestDetectCloudInit(t *testing.T) {
 	}
 	if got.Boot != "" {
 		t.Errorf("cloud images have no seedable boot partition, got %q", got.Boot)
+	}
+}
+
+func TestDetectPlainLinuxRootWithoutCloudInit(t *testing.T) {
+	root := makeLinuxRoot(t)
+	disk := fakeDisk(blockdev.Partition{Path: "/dev/sda1", FSType: "ext4"})
+	got := Detect(disk, mounter(map[string]string{"/dev/sda1": root}))
+	if got.Seedable() {
+		t.Fatalf("plain linux root without cloud-init must not be seedable, got %v", got.Family)
+	}
+	if !strings.Contains(got.Reason, "cloud-init") {
+		t.Errorf("expected reason to mention cloud-init, got %q", got.Reason)
 	}
 }
 

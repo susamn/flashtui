@@ -2,6 +2,12 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -101,11 +107,58 @@ func startFlash(esc *privilege.Escalator, job flash.Job, disk blockdev.Disk, ter
 	job.OnAuthenticated = term.restore
 
 	run := func() tea.Msg {
+		// Preflight source image before releasing terminal or unmounting target filesystems
+		imgFile, err := os.Open(job.Image.Path)
+		if err != nil {
+			close(updates)
+			return flashDoneMsg{target: job.Target, err: fmt.Errorf("cannot access image file: %w", err)}
+		}
+		imgFile.Close()
+
+		resolvedImg := job.Image.Path
+		if realPath, err := filepath.EvalSymlinks(job.Image.Path); err == nil {
+			resolvedImg = realPath
+		}
+		absImg, err := filepath.Abs(resolvedImg)
+		if err == nil {
+			for _, p := range disk.Partitions {
+				if p.MountPoint != "" {
+					mp := p.MountPoint
+					if realMP, err := filepath.EvalSymlinks(mp); err == nil {
+						mp = realMP
+					}
+					cleanMP := filepath.Clean(mp)
+					if absImg == cleanMP || strings.HasPrefix(absImg, cleanMP+string(filepath.Separator)) {
+						close(updates)
+						return flashDoneMsg{target: job.Target, err: errors.New("cannot flash: image file resides on target device")}
+					}
+				}
+			}
+		}
+
+		if st, err := os.Stat(resolvedImg); err == nil {
+			if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+				for _, p := range disk.Partitions {
+					if p.MountPoint != "" {
+						if mpSt, err := os.Stat(p.MountPoint); err == nil {
+							if mpSys, ok := mpSt.Sys().(*syscall.Stat_t); ok {
+								if mpSys.Dev == sys.Dev {
+									close(updates)
+									return flashDoneMsg{target: job.Target, err: errors.New("cannot flash: image file resides on target device")}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
 		term.release()
+		defer term.restore()
 		// Writing to a disk whose filesystems are mounted corrupts the
 		// kernel's cached view of them, so this has to succeed first.
 		uctx, ucancel := context.WithTimeout(ctx, opTimeout)
-		err := mountctl.UnmountAll(uctx, partitionPaths(disk))
+		err = mountctl.UnmountAll(uctx, partitionPaths(disk))
 		ucancel()
 		if err != nil {
 			close(updates)
