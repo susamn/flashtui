@@ -3,6 +3,7 @@ package seed
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -33,6 +34,9 @@ var userRE = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 // hostRE is the RFC 1123 label rule.
 var hostRE = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
 
+// countryRE matches ISO 3166-1 alpha-2 codes.
+var countryRE = regexp.MustCompile(`^[a-zA-Z]{2}$`)
+
 // Validate reports the first problem that would make the seeded image
 // unreachable, which is the whole point of seeding it.
 func (c Config) Validate() error {
@@ -60,11 +64,20 @@ func (c Config) Validate() error {
 		}
 	}
 	if c.WifiSSID != "" {
+		if strings.ContainsAny(c.WifiSSID, "\n\r\x00") {
+			return errors.New("wifi SSID cannot contain control characters or newlines")
+		}
+		if len(c.WifiSSID) > 128 {
+			return errors.New("wifi SSID must be at most 128 bytes")
+		}
 		if len(c.WifiPSK) < 8 || len(c.WifiPSK) > 63 {
 			return errors.New("wifi passphrase must be between 8 and 63 characters")
 		}
-		if len(c.WifiCountry) != 2 {
-			return errors.New("wifi needs a two-letter country code to set the regulatory domain")
+		if strings.ContainsAny(c.WifiPSK, "\n\r\x00") {
+			return errors.New("wifi passphrase cannot contain control characters or newlines")
+		}
+		if !countryRE.MatchString(c.WifiCountry) {
+			return errors.New("wifi needs a two-letter ISO country code (e.g. US, GB, IN)")
 		}
 	}
 	return nil
@@ -103,8 +116,22 @@ func validateKey(k string) error {
 	}
 	// The payload must be real base64, which catches a truncated copy-paste
 	// before it becomes an authorized_keys line sshd silently ignores.
-	if _, err := base64.StdEncoding.DecodeString(fields[1]); err != nil {
+	raw, err := base64.StdEncoding.DecodeString(fields[1])
+	if err != nil {
 		return errors.New("SSH key payload is not valid base64; the key looks truncated or mangled")
+	}
+	// Structural OpenSSH public key validation:
+	// The binary wire format starts with a 4-byte big-endian length prefix encoding the key type.
+	if len(raw) < 4 {
+		return errors.New("SSH key payload is too short to be a valid public key")
+	}
+	typeLen := int(binary.BigEndian.Uint32(raw[:4]))
+	if typeLen <= 0 || 4+typeLen > len(raw) {
+		return errors.New("SSH key payload has invalid wire format")
+	}
+	embeddedType := string(raw[4 : 4+typeLen])
+	if embeddedType != fields[0] {
+		return fmt.Errorf("SSH key declares type %q but wire format specifies %q", fields[0], embeddedType)
 	}
 	return nil
 }

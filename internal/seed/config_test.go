@@ -29,6 +29,8 @@ func TestValidate(t *testing.T) {
 		{"bad hostname", func(c *Config) { c.Hostname = "-nope-" }, "DNS label"},
 		{"short psk", func(c *Config) { c.WifiSSID = "net"; c.WifiPSK = "abc"; c.WifiCountry = "IN" }, "8 and 63"},
 		{"no country", func(c *Config) { c.WifiSSID = "net"; c.WifiPSK = "abcdefgh"; c.WifiCountry = "" }, "country code"},
+		{"numeric country", func(c *Config) { c.WifiSSID = "net"; c.WifiPSK = "abcdefgh"; c.WifiCountry = "12" }, "country code"},
+		{"ssid newline", func(c *Config) { c.WifiSSID = "net\nwork"; c.WifiPSK = "abcdefgh"; c.WifiCountry = "US" }, "control characters"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,6 +60,9 @@ func TestValidateKeyShapes(t *testing.T) {
 	good := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample susamn@host"
 	if err := validateKey(good); err != nil {
 		t.Errorf("rejected a valid key: %v", err)
+	}
+	if err := validateKey("ssh-ed25519 AAAA"); err == nil {
+		t.Error("malformed/truncated wire format should be rejected")
 	}
 	if err := validateKey("ssh-ed25519"); err == nil {
 		t.Error("a type with no payload is not a key")
