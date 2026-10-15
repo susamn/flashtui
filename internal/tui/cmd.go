@@ -20,6 +20,12 @@ import (
 // card can legitimately take a very long time.
 const opTimeout = 60 * time.Second
 
+// unmountAll is swapped out in tests.
+var unmountAll = mountctl.UnmountAll
+
+// mountPart is swapped out in tests.
+var mountPart = mountctl.Mount
+
 func scanImages(dir string) tea.Cmd {
 	return func() tea.Msg {
 		imgs, err := imagefile.Scan(dir)
@@ -61,7 +67,7 @@ func unmountDisk(opID int, disk blockdev.Disk) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 		defer cancel()
-		err := mountctl.UnmountAll(ctx, partitionPaths(disk))
+		err := unmountAll(ctx, partitionPaths(disk))
 		return mountMsg{opID: opID, action: "unmount", detail: disk.Path, err: err}
 	}
 }
@@ -72,7 +78,7 @@ func powerOffDisk(opID int, disk blockdev.Disk) tea.Cmd {
 		defer cancel()
 		// Powering off a disk with mounted filesystems loses whatever is still
 		// in the page cache, so release them first.
-		if err := mountctl.UnmountAll(ctx, partitionPaths(disk)); err != nil {
+		if err := unmountAll(ctx, partitionPaths(disk)); err != nil {
 			return mountMsg{opID: opID, action: "power off", err: err}
 		}
 		err := mountctl.PowerOff(ctx, disk.Path)
@@ -139,7 +145,7 @@ func startFlash(opID int, esc *privilege.Escalator, job flash.Job, disk blockdev
 		// Writing to a disk whose filesystems are mounted corrupts the
 		// kernel's cached view of them, so this has to succeed first.
 		uctx, ucancel := context.WithTimeout(ctx, opTimeout)
-		err = mountctl.UnmountAll(uctx, partitionPaths(*freshDisk))
+		err = unmountAll(uctx, partitionPaths(*freshDisk))
 		ucancel()
 		if err != nil {
 			close(updates)
@@ -209,7 +215,7 @@ func detectAfterFlash(opID int, target string) tea.Cmd {
 // applySeed mounts what the detection named, writes the configuration, then
 // unmounts again so the card is safe to pull.
 func applySeed(opID int, esc *privilege.Escalator, det seed.Detection, cfg seed.Config, scratch string, term *terminal) tea.Cmd {
-	return func() tea.Msg {
+	return func() (msg tea.Msg) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
@@ -220,9 +226,8 @@ func applySeed(opID int, esc *privilege.Escalator, det seed.Detection, cfg seed.
 
 		var m seed.Mounted
 		var toUnmount []string
-		var cleanupErr error
 		mount := func(part string) (string, error) {
-			mp, err := mountctl.Mount(ctx, part)
+			mp, err := mountPart(ctx, part)
 			if err != nil {
 				return "", err
 			}
@@ -232,8 +237,10 @@ func applySeed(opID int, esc *privilege.Escalator, det seed.Detection, cfg seed.
 		defer func() {
 			uctx, ucancel := context.WithTimeout(context.Background(), opTimeout)
 			defer ucancel()
-			if uerr := mountctl.UnmountAll(uctx, toUnmount); uerr != nil && cleanupErr == nil {
-				cleanupErr = uerr
+			if uerr := unmountAll(uctx, toUnmount); uerr != nil {
+				if smsg, ok := msg.(seedDoneMsg); ok && smsg.err == nil {
+					msg = seedDoneMsg{opID: opID, err: fmt.Errorf("seed applied, but cleanup unmount failed: %w", uerr)}
+				}
 			}
 		}()
 
@@ -250,14 +257,7 @@ func applySeed(opID int, esc *privilege.Escalator, det seed.Detection, cfg seed.
 		}
 		m.Root = mp
 
-		seedErr := seed.Apply(ctx, esc, det, cfg, m, scratch)
-		if seedErr != nil {
-			return seedDoneMsg{opID: opID, err: seedErr}
-		}
-		if cleanupErr != nil {
-			return seedDoneMsg{opID: opID, err: fmt.Errorf("seed applied, but cleanup failed: %w", cleanupErr)}
-		}
-		return seedDoneMsg{opID: opID, err: nil}
+		return seedDoneMsg{opID: opID, err: seed.Apply(ctx, esc, det, cfg, m, scratch)}
 	}
 }
 

@@ -1,12 +1,19 @@
 package tui
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/susamn/flashtui/internal/blockdev"
 	"github.com/susamn/flashtui/internal/imagefile"
+	"github.com/susamn/flashtui/internal/privilege"
+	"github.com/susamn/flashtui/internal/seed"
 )
 
 func key(s string) tea.KeyMsg {
@@ -230,5 +237,57 @@ func TestWindowResizeClampsLists(t *testing.T) {
 	m = next.(Model)
 	if m.imgList.cursor < 0 || m.imgList.cursor >= len(m.images) {
 		t.Errorf("cursor after resize out of bounds: %d", m.imgList.cursor)
+	}
+}
+
+func TestApplySeedPropagatesUnmountCleanupFailure(t *testing.T) {
+	origMount := mountPart
+	origUnmount := unmountAll
+	defer func() {
+		mountPart = origMount
+		unmountAll = origUnmount
+	}()
+
+	tempRoot := t.TempDir()
+	for _, sub := range []string{"etc", "home", "var"} {
+		if err := os.MkdirAll(filepath.Join(tempRoot, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(tempRoot, "etc", "passwd"), []byte("root:x:0:0::/root:/bin/bash\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mountPart = func(ctx context.Context, part string) (string, error) {
+		return tempRoot, nil
+	}
+	unmountAll = func(ctx context.Context, parts []string) error {
+		return errors.New("device busy")
+	}
+
+	det := seed.Detection{
+		Family: seed.CloudInit,
+		Root:   "/dev/sda1",
+	}
+	cfg := seed.Config{
+		Username:      "ubuntu",
+		Password:      "hunter2",
+		AuthorizedKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample test@host",
+		Hostname:      "mycloud",
+	}
+
+	term := newTerminal()
+	cmd := applySeed(1, privilege.Direct(), det, cfg, t.TempDir(), term)
+	msg := cmd()
+
+	done, ok := msg.(seedDoneMsg)
+	if !ok {
+		t.Fatalf("expected seedDoneMsg, got %T", msg)
+	}
+	if done.err == nil {
+		t.Fatal("expected error when unmount fails during cleanup")
+	}
+	if !strings.Contains(done.err.Error(), "cleanup unmount failed") {
+		t.Errorf("expected error to mention cleanup unmount failed, got: %v", done.err)
 	}
 }
