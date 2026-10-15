@@ -2,6 +2,11 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -101,11 +106,33 @@ func startFlash(esc *privilege.Escalator, job flash.Job, disk blockdev.Disk, ter
 	job.OnAuthenticated = term.restore
 
 	run := func() tea.Msg {
+		// Preflight source image before releasing terminal or unmounting target filesystems
+		imgFile, err := os.Open(job.Image.Path)
+		if err != nil {
+			close(updates)
+			return flashDoneMsg{target: job.Target, err: fmt.Errorf("cannot access image file: %w", err)}
+		}
+		imgFile.Close()
+
+		absImg, err := filepath.Abs(job.Image.Path)
+		if err == nil {
+			for _, p := range disk.Partitions {
+				if p.MountPoint != "" {
+					cleanMP := filepath.Clean(p.MountPoint)
+					if absImg == cleanMP || strings.HasPrefix(absImg, cleanMP+string(filepath.Separator)) {
+						close(updates)
+						return flashDoneMsg{target: job.Target, err: errors.New("cannot flash: image file resides on target device")}
+					}
+				}
+			}
+		}
+
 		term.release()
+		defer term.restore()
 		// Writing to a disk whose filesystems are mounted corrupts the
 		// kernel's cached view of them, so this has to succeed first.
 		uctx, ucancel := context.WithTimeout(ctx, opTimeout)
-		err := mountctl.UnmountAll(uctx, partitionPaths(disk))
+		err = mountctl.UnmountAll(uctx, partitionPaths(disk))
 		ucancel()
 		if err != nil {
 			close(updates)

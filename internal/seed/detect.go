@@ -75,6 +75,7 @@ func Detect(disk blockdev.Disk, mount func(part string) (string, func(), error))
 	}
 
 	var bootPart, rootPart string
+	var hasCloudInit bool
 	for _, p := range disk.Partitions {
 		mp, done, err := mount(p.Path)
 		if err != nil {
@@ -85,6 +86,7 @@ func Detect(disk blockdev.Disk, mount func(part string) (string, func(), error))
 		}
 		if rootPart == "" && looksLikeLinuxRoot(mp) {
 			rootPart = p.Path
+			hasCloudInit = looksLikeCloudInit(mp)
 		}
 		done()
 	}
@@ -92,14 +94,25 @@ func Detect(disk blockdev.Disk, mount func(part string) (string, func(), error))
 	switch {
 	case bootPart != "" && rootPart != "":
 		return Detection{Family: RaspberryPiOS, Boot: bootPart, Root: rootPart}
-	case rootPart != "":
+	case rootPart != "" && hasCloudInit:
 		return Detection{Family: CloudInit, Root: rootPart}
+	case rootPart != "":
+		return Detection{
+			Reason: "Linux root detected, but image has no cloud-init or first-boot configuration hook installed",
+		}
 	default:
 		return Detection{
 			Reason: "no Linux root filesystem found; the image exposes no " +
 				"first-boot hook to seed",
 		}
 	}
+}
+
+// looksLikeCloudInit detects presence of cloud-init configuration or services on the root filesystem.
+func looksLikeCloudInit(mp string) bool {
+	return exists(filepath.Join(mp, "etc", "cloud")) ||
+		exists(filepath.Join(mp, "var", "lib", "cloud")) ||
+		exists(filepath.Join(mp, "etc", "cloud", "cloud.cfg"))
 }
 
 // looksLikeRaspiBoot identifies the Pi firmware partition by the files the

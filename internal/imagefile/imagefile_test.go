@@ -176,6 +176,17 @@ func TestDetectIgnoresExtension(t *testing.T) {
 	}
 }
 
+func TestInspectRejectsEmptyAndNonRegular(t *testing.T) {
+	dir := t.TempDir()
+	empty := writeFile(t, dir, "empty.img", nil)
+	if _, err := Inspect(empty); err == nil {
+		t.Fatal("expected error for empty file")
+	}
+	if _, err := Inspect(dir); err == nil {
+		t.Fatal("expected error for directory")
+	}
+}
+
 func TestScanFiltersAndSorts(t *testing.T) {
 	dir := t.TempDir()
 	raw := payload(1024)

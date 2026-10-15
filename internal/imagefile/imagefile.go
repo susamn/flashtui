@@ -125,6 +125,12 @@ func Inspect(path string) (Image, error) {
 	if err != nil {
 		return Image{}, err
 	}
+	if !st.Mode().IsRegular() {
+		return Image{}, fmt.Errorf("%s is not a regular file", path)
+	}
+	if st.Size() == 0 {
+		return Image{}, fmt.Errorf("%s is an empty file", path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return Image{}, err
