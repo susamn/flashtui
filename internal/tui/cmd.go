@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -114,14 +115,39 @@ func startFlash(esc *privilege.Escalator, job flash.Job, disk blockdev.Disk, ter
 		}
 		imgFile.Close()
 
-		absImg, err := filepath.Abs(job.Image.Path)
+		resolvedImg := job.Image.Path
+		if realPath, err := filepath.EvalSymlinks(job.Image.Path); err == nil {
+			resolvedImg = realPath
+		}
+		absImg, err := filepath.Abs(resolvedImg)
 		if err == nil {
 			for _, p := range disk.Partitions {
 				if p.MountPoint != "" {
-					cleanMP := filepath.Clean(p.MountPoint)
+					mp := p.MountPoint
+					if realMP, err := filepath.EvalSymlinks(mp); err == nil {
+						mp = realMP
+					}
+					cleanMP := filepath.Clean(mp)
 					if absImg == cleanMP || strings.HasPrefix(absImg, cleanMP+string(filepath.Separator)) {
 						close(updates)
 						return flashDoneMsg{target: job.Target, err: errors.New("cannot flash: image file resides on target device")}
+					}
+				}
+			}
+		}
+
+		if st, err := os.Stat(resolvedImg); err == nil {
+			if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+				for _, p := range disk.Partitions {
+					if p.MountPoint != "" {
+						if mpSt, err := os.Stat(p.MountPoint); err == nil {
+							if mpSys, ok := mpSt.Sys().(*syscall.Stat_t); ok {
+								if mpSys.Dev == sys.Dev {
+									close(updates)
+									return flashDoneMsg{target: job.Target, err: errors.New("cannot flash: image file resides on target device")}
+								}
+							}
+						}
 					}
 				}
 			}
