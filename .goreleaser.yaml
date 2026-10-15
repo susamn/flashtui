@@ -64,17 +64,22 @@ homebrew_casks:
     description: "Terminal UI for writing OS images to removable drives"
     commit_msg_template: "flashtui {{ .Tag }}"
     caveats: |
-      flashtui drives system tools Homebrew does not package. Install them
-      with your distribution's package manager:
+      flashtui supports Linux amd64 and arm64. Install its runtime tools
+      with your distribution's package manager, not Homebrew:
 
-        Arch     sudo pacman -S util-linux systemd polkit
-        Debian   sudo apt install util-linux udev policykit-1
-        Fedora   sudo dnf install util-linux systemd-udev polkit
+        Arch     sudo pacman -S util-linux systemd polkit udisks2 parted openssl
+        Debian   sudo apt install util-linux udev pkexec polkitd udisks2 parted openssl
+        Fedora   sudo dnf install util-linux systemd-udev polkit udisks2 parted openssl
 
-      It needs lsblk, udevadm and partprobe to enumerate drives, and
-      pkexec to acquire the privileges writing a block device requires.
-      Compressed images additionally need xz, gzip or zstd on PATH,
-      whichever formats you intend to write.
+      lsblk enumerates drives; udisksctl (udisks2) mounts, unmounts and
+      powers them off. pkexec (polkit) authorizes writes, partprobe (parted)
+      refreshes partitions, and udevadm waits for device discovery.
+      Password-based headless setup needs openssl or mkpasswd (whois).
+      Decompression is built in: no external xz, gzip or zstd is needed.
+
+      Run flashtui as your normal user in an interactive terminal.
+      udisks2 must be available through the system D-Bus; authorization
+      depends on your session's polkit policy.
 
       Do not reach for `brew install util-linux` here. Homebrew's lsblk is
       not linked against libudev and silently reports no filesystem type,
