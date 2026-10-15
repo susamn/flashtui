@@ -102,6 +102,7 @@ func startFlash(esc *privilege.Escalator, job flash.Job, disk blockdev.Disk, ter
 
 	run := func() tea.Msg {
 		term.release()
+		defer term.restore()
 		// Writing to a disk whose filesystems are mounted corrupts the
 		// kernel's cached view of them, so this has to succeed first.
 		uctx, ucancel := context.WithTimeout(ctx, opTimeout)

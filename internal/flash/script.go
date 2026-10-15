@@ -24,6 +24,7 @@ func buildScript(target string, verify, directRead bool, blockSize int) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
 	b.WriteString("set -eu\n")
+	b.WriteString("export LC_ALL=C\n")
 	// Printed the instant the script starts, which is the instant pkexec has
 	// finished authenticating. The caller watches for it so the terminal is
 	// released only for the password prompt, not for the whole write.
@@ -34,7 +35,14 @@ func buildScript(target string, verify, directRead bool, blockSize int) string {
 # conv=fsync makes dd flush before exiting, so a clean exit means the bytes
 # reached the device rather than the page cache.
 ERR=$(mktemp)
-trap 'rm -f "$ERR"' EXIT
+cleanup() {
+  status=$?
+  if [ $status -ne 0 ] && [ -f "$ERR" ]; then
+    cat "$ERR" >&2
+  fi
+  rm -f "$ERR"
+}
+trap cleanup EXIT
 dd of="$TARGET" bs="$BS" conv=fsync 2>"$ERR"
 `)
 	if verify {
