@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -59,6 +60,11 @@ func mountDisk(disk blockdev.Disk) tea.Cmd {
 }
 
 func unmountDisk(disk blockdev.Disk) tea.Cmd {
+	if disk.System {
+		return func() tea.Msg {
+			return mountMsg{action: "unmount", detail: disk.Path, err: errors.New("cannot unmount system disk")}
+		}
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 		defer cancel()
@@ -97,6 +103,13 @@ func partitionPaths(d blockdev.Disk) []string {
 func startFlash(esc *privilege.Escalator, job flash.Job, disk blockdev.Disk, term *terminal) (tea.Cmd, chan flash.Progress, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	updates := make(chan flash.Progress, 64)
+
+	if disk.System {
+		return func() tea.Msg {
+			close(updates)
+			return flashDoneMsg{target: job.Target, err: errors.New("refusing to flash the system disk")}
+		}, updates, cancel
+	}
 
 	// pkexec prompts on /dev/tty, which bubbletea is holding in raw mode. The
 	// terminal goes back to the shell for the prompt and is reclaimed as soon

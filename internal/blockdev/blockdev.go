@@ -73,25 +73,48 @@ func (d Disk) Description() string {
 // null for devices that do not carry them, so every field is a json.Number or
 // pointer-friendly type rather than a plain uint64.
 type lsblkNode struct {
-	Name       string      `json:"name"`
-	Path       string      `json:"path"`
-	Type       string      `json:"type"`
-	Size       json.Number `json:"size"`
-	Model      string      `json:"model"`
-	Vendor     string      `json:"vendor"`
-	Serial     string      `json:"serial"`
-	Tran       string      `json:"tran"`
-	RM         bool        `json:"rm"`
-	Hotplug    bool        `json:"hotplug"`
-	RO         bool        `json:"ro"`
-	PTType     string      `json:"pttype"`
-	FSType     string      `json:"fstype"`
-	Label      string      `json:"label"`
-	UUID       string      `json:"uuid"`
-	FSAvail    json.Number `json:"fsavail"`
-	FSUsed     json.Number `json:"fsused"`
-	MountPoint string      `json:"mountpoint"`
-	Children   []lsblkNode `json:"children"`
+	Name        string      `json:"name"`
+	Path        string      `json:"path"`
+	Type        string      `json:"type"`
+	Size        json.Number `json:"size"`
+	Model       string      `json:"model"`
+	Vendor      string      `json:"vendor"`
+	Serial      string      `json:"serial"`
+	Tran        string      `json:"tran"`
+	RM          bool        `json:"rm"`
+	Hotplug     bool        `json:"hotplug"`
+	RO          bool        `json:"ro"`
+	PTType      string      `json:"pttype"`
+	FSType      string      `json:"fstype"`
+	Label       string      `json:"label"`
+	UUID        string      `json:"uuid"`
+	FSAvail     json.Number `json:"fsavail"`
+	FSUsed      json.Number `json:"fsused"`
+	MountPoint  string      `json:"mountpoint"`
+	MountPoints []*string   `json:"mountpoints"`
+	Children    []lsblkNode `json:"children"`
+}
+
+func (n lsblkNode) allMountPoints() []string {
+	var mps []string
+	if n.MountPoint != "" {
+		mps = append(mps, n.MountPoint)
+	}
+	for _, p := range n.MountPoints {
+		if p != nil && *p != "" {
+			found := false
+			for _, m := range mps {
+				if m == *p {
+					found = true
+					break
+				}
+			}
+			if !found {
+				mps = append(mps, *p)
+			}
+		}
+	}
+	return mps
 }
 
 func (n lsblkNode) bytes(v json.Number) uint64 {
@@ -112,14 +135,19 @@ var runner = func(name string, args ...string) ([]byte, error) {
 
 // lsblkFields is the explicit column set. Asking for the columns we use instead
 // of -O keeps the output small and stable across util-linux versions.
-const lsblkFields = "NAME,PATH,TYPE,SIZE,MODEL,VENDOR,SERIAL,TRAN,RM,HOTPLUG,RO,PTTYPE,FSTYPE,LABEL,UUID,FSAVAIL,FSUSED,MOUNTPOINT"
+// We request MOUNTPOINTS (plural) to capture bind mounts and multiple mounts.
+const lsblkFields = "NAME,PATH,TYPE,SIZE,MODEL,VENDOR,SERIAL,TRAN,RM,HOTPLUG,RO,PTTYPE,FSTYPE,LABEL,UUID,FSAVAIL,FSUSED,MOUNTPOINT,MOUNTPOINTS"
+const lsblkFieldsFallback = "NAME,PATH,TYPE,SIZE,MODEL,VENDOR,SERIAL,TRAN,RM,HOTPLUG,RO,PTTYPE,FSTYPE,LABEL,UUID,FSAVAIL,FSUSED,MOUNTPOINT"
 
 // List returns every whole disk on the system, partitions attached, with
 // System already resolved.
 func List() ([]Disk, error) {
 	out, err := runner(lsblkBinary(), "--json", "--bytes", "--paths", "-o", lsblkFields)
 	if err != nil {
-		return nil, fmt.Errorf("lsblk: %w", err)
+		out, err = runner(lsblkBinary(), "--json", "--bytes", "--paths", "-o", lsblkFieldsFallback)
+		if err != nil {
+			return nil, fmt.Errorf("lsblk: %w", err)
+		}
 	}
 	var doc struct {
 		BlockDevices []lsblkNode `json:"blockdevices"`
@@ -177,13 +205,18 @@ func collectPartitions(n lsblkNode) []Partition {
 				FSUsed:     c.bytes(c.FSUsed),
 				MountPoint: c.MountPoint,
 			}
+			if p.MountPoint == "" {
+				if mps := c.allMountPoints(); len(mps) > 0 {
+					p.MountPoint = mps[0]
+				}
+			}
 			// A LUKS or LVM partition reports its own fstype as "crypto_LUKS"
 			// and carries the real filesystem on a child mapper node. Show the
 			// mapper's filesystem so the pane is not a wall of crypto_LUKS.
 			if p.MountPoint == "" && len(c.Children) > 0 {
 				m := c.Children[0]
-				if m.MountPoint != "" {
-					p.MountPoint = m.MountPoint
+				if mps := m.allMountPoints(); len(mps) > 0 {
+					p.MountPoint = mps[0]
 					p.FSType = m.FSType
 					p.FSAvail = c.bytes(m.FSAvail)
 					p.FSUsed = c.bytes(m.FSUsed)
@@ -196,15 +229,33 @@ func collectPartitions(n lsblkNode) []Partition {
 	return parts
 }
 
-// systemMounts are the mountpoints whose disk must never be offered as a flash
+// systemMountPrefixes are filesystem hierarchies whose disk must never be offered as a flash
 // target. "/" and "/boot" are fatal on their own; the rest mean the machine is
-// actively using the disk.
-var systemMounts = []string{"/", "/boot", "/boot/efi", "/efi", "/home", "/var", "/usr", "/nix", "[SWAP]"}
+// actively using the disk for OS components or user data.
+var systemMountPrefixes = []string{
+	"/",
+	"/boot",
+	"/boot/efi",
+	"/efi",
+	"/home",
+	"/var",
+	"/usr",
+	"/nix",
+	"/etc",
+	"/opt",
+	"/srv",
+	"/root",
+}
 
 // holdsSystemMount reports whether any node in the subtree is mounted at a
 // path the running system depends on.
 func holdsSystemMount(n lsblkNode) bool {
-	if isSystemMount(n.MountPoint) {
+	for _, mp := range n.allMountPoints() {
+		if isSystemMount(mp) {
+			return true
+		}
+	}
+	if n.FSType == "swap" && (n.MountPoint != "" || len(n.MountPoints) > 0) {
 		return true
 	}
 	for _, c := range n.Children {
@@ -219,8 +270,19 @@ func isSystemMount(mp string) bool {
 	if mp == "" {
 		return false
 	}
-	for _, s := range systemMounts {
+	if mp == "[SWAP]" || strings.HasPrefix(mp, "[SWAP") {
+		return true
+	}
+	for _, s := range systemMountPrefixes {
 		if mp == s {
+			return true
+		}
+	}
+	for _, s := range systemMountPrefixes {
+		if s == "/" {
+			continue
+		}
+		if strings.HasPrefix(mp, s+"/") {
 			return true
 		}
 	}
