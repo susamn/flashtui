@@ -29,6 +29,7 @@ race:
 cover:
 	$(GO) test -coverprofile=coverage.out -covermode=atomic $(PKGS)
 	$(GO) tool cover -func=coverage.out | tail -1
+	awk -v minimum=95 -f scripts/check-coverage.awk coverage.out
 
 vet:
 	$(GO) vet $(PKGS)
@@ -45,4 +46,4 @@ tidy:
 clean:
 	rm -f $(BINARY) coverage.out
 
-check: fmt-check vet test
+check: fmt-check vet cover

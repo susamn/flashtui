@@ -61,7 +61,7 @@ Or build it yourself:
 
 ```sh
 make build          # produces ./flashtui
-make check          # gofmt, vet and tests
+make check          # gofmt, vet, tests and >=95% statement coverage per package
 ```
 
 Run it with `./flashtui`, or `./flashtui -dir /path/to/images` to start
