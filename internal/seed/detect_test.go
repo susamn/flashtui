@@ -98,6 +98,26 @@ func TestDetectNoPartitions(t *testing.T) {
 	}
 }
 
+func TestDetectRejectsSymlinkedSystemDirs(t *testing.T) {
+	d := t.TempDir()
+	extTarget := t.TempDir()
+	if err := os.Symlink(extTarget, filepath.Join(d, "etc")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(d, "home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(d, "var"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	disk := fakeDisk(blockdev.Partition{Path: "/dev/sda1", FSType: "ext4"})
+	got := Detect(disk, mounter(map[string]string{"/dev/sda1": d}))
+	if got.Seedable() {
+		t.Fatalf("root with symlinked /etc must not be seedable, got %v", got.Family)
+	}
+}
+
 func TestDetectUnrecognisedFilesystem(t *testing.T) {
 	d := t.TempDir() // empty: no etc/home/var, no config.txt
 	disk := fakeDisk(blockdev.Partition{Path: "/dev/sda1", FSType: "ext4"})

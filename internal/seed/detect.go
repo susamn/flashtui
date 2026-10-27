@@ -105,25 +105,41 @@ func Detect(disk blockdev.Disk, mount func(part string) (string, func(), error))
 // looksLikeRaspiBoot identifies the Pi firmware partition by the files the
 // bootloader itself requires, rather than by the "bootfs" label, which a user
 // can change and some derivatives do not set.
+// It verifies the files are regular files and not symlinks that could escape
+// the mounted filesystem.
 func looksLikeRaspiBoot(mp string) bool {
-	return exists(filepath.Join(mp, "config.txt")) && exists(filepath.Join(mp, "cmdline.txt"))
+	return safeIsRegular(mp, "config.txt") && safeIsRegular(mp, "cmdline.txt")
 }
 
 // looksLikeLinuxRoot identifies a real root filesystem. All three must be
-// present so that a boot partition carrying a stray /etc is not mistaken for
-// the root.
+// present as genuine directories (not symlinks) so that an image cannot
+// manipulate detection via symlinks pointing outside the mount.
 func looksLikeLinuxRoot(mp string) bool {
-	return isDir(filepath.Join(mp, "etc")) &&
-		isDir(filepath.Join(mp, "home")) &&
-		isDir(filepath.Join(mp, "var"))
+	return safeIsDir(mp, "etc") &&
+		safeIsDir(mp, "home") &&
+		safeIsDir(mp, "var")
 }
 
-func exists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
+func safeIsRegular(base, sub string) bool {
+	p := filepath.Join(base, sub)
+	st, err := os.Lstat(p)
+	if err != nil {
+		return false
+	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	return st.Mode().IsRegular()
 }
 
-func isDir(p string) bool {
-	st, err := os.Stat(p)
-	return err == nil && st.IsDir()
+func safeIsDir(base, sub string) bool {
+	p := filepath.Join(base, sub)
+	st, err := os.Lstat(p)
+	if err != nil {
+		return false
+	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	return st.IsDir()
 }
