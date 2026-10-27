@@ -14,6 +14,11 @@ import (
 // which is the honest answer for an untagged tree.
 var version = "dev"
 
+// Kept as seams so argument and failure handling can be exercised without
+// starting an interactive terminal or terminating the test process.
+var runTUI = tui.Run
+var exit = os.Exit
+
 func main() {
 	dir := flag.String("dir", "", "directory to scan for images (default: ~/Downloads)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
@@ -30,8 +35,8 @@ func main() {
 		return
 	}
 
-	if err := tui.Run(*dir); err != nil {
+	if err := runTUI(*dir); err != nil {
 		fmt.Fprintf(os.Stderr, "flashtui: %v\n", err)
-		os.Exit(1)
+		exit(1)
 	}
 }

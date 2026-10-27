@@ -25,9 +25,12 @@ func scanImages(dir string) tea.Cmd {
 	}
 }
 
+// enumerateDisks is replaceable in tests so detection never probes host devices.
+var enumerateDisks = blockdev.List
+
 func listDisks() tea.Cmd {
 	return func() tea.Msg {
-		disks, err := blockdev.List()
+		disks, err := enumerateDisks()
 		return disksMsg{disks: disks, err: err}
 	}
 }
@@ -142,7 +145,7 @@ func detectAfterFlash(target string) tea.Cmd {
 		// udev to catch up, so it needs no second escalation.
 		mountctl.Settle(ctx)
 
-		disks, err := blockdev.List()
+		disks, err := enumerateDisks()
 		if err != nil {
 			return detectMsg{err: err}
 		}

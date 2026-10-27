@@ -10,6 +10,11 @@ import (
 	"github.com/susamn/flashtui/internal/privilege"
 )
 
+// programFactory is replaceable in tests to run the event loop without a tty.
+var programFactory = func(m tea.Model) *tea.Program {
+	return tea.NewProgram(m, tea.WithAltScreen())
+}
+
 // Run starts the interactive program and blocks until the user quits.
 func Run(imageDir string) error {
 	esc, err := privilege.New()
@@ -26,7 +31,7 @@ func Run(imageDir string) error {
 	defer os.RemoveAll(scratch)
 
 	m := New(esc, imageDir, scratch)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := programFactory(m)
 	// The model needs the program to lend the terminal to pkexec, and the
 	// program needs the model to exist first, so the handle is attached here.
 	m.term.attach(p)
